@@ -2,7 +2,7 @@
 
 The script is the post-deploy check an operator runs by hand (AGENTS.md section 4,
 step 11) and CI runs against the real compose stack. Here it runs against fake
-`docker` and `curl` executables on PATH, which is enough to pin the branching:
+`docker` and `curl` commands, which is enough to pin the branching:
 the compose-in-this-directory path CI depends on, and the managed-stack path
 (Komodo, Portainer) where `./.env` is root-owned and everything has to come from
 the containers.
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -20,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash, run_bounded
 
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "smoke.sh"
@@ -28,10 +29,10 @@ SMOKE = ROOT / "scripts" / "smoke.sh"
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
 
-FAKE_DOCKER = r"""#!/usr/bin/env bash
+FAKE_DOCKER = r"""local cmd value url
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
 if [ "${FAKE_NATIVE_PATH_BOUNDARY:-}" = yes ] && [ "${MSYS_NO_PATHCONV:-}" != 1 ]; then
-  echo "container paths were not protected" >&2; exit 77
+  echo "container paths were not protected" >&2; return 77
 fi
 
 if [ "$1" = "compose" ] && [ "$2" = "ps" ]; then
@@ -39,11 +40,11 @@ if [ "$1" = "compose" ] && [ "$2" = "ps" ]; then
     *" -q "*) printf '%s\n' "${FAKE_BRIDGE_ID:-}" ;;   # compose ps -q bridge
     *) printf '%s' "${FAKE_COMPOSE_PS:-}" ;;
   esac
-  exit 0
+  return 0
 fi
 if [ "$1" = "compose" ] && [ "$2" = "ls" ]; then
   printf '%s\n' "${FAKE_COMPOSE_LS:-[]}"
-  exit 0
+  return 0
 fi
 if [ "$1" = "ps" ]; then
   case "$*" in
@@ -51,7 +52,7 @@ if [ "$1" = "ps" ]; then
     *com.docker.compose.service=mcp*)     printf '%s\n' "${FAKE_MCP_CTR:-}" ;;
     *) printf '  bridge: running (Up 3 minutes)\n  mcp: running (Up 3 minutes)\n' ;;
   esac
-  exit 0
+  return 0
 fi
 if [ "$1" = "inspect" ]; then   # inspect -f <template> <container>
   case "$3" in
@@ -62,18 +63,18 @@ if [ "$1" = "inspect" ]; then   # inspect -f <template> <container>
         "${FAKE_BRIDGE_CTR:-@no-bridge@}"|"${FAKE_BRIDGE_ID:-@no-bridge@}")
           printf '%s\n' "${FAKE_BRIDGE_ID:-}" ;;
         *)
-          [ -n "${FAKE_NETNS_RESOLVES_TO:-}" ] || { echo "No such object: $4" >&2; exit 1; }
+          [ -n "${FAKE_NETNS_RESOLVES_TO:-}" ] || { echo "No such object: $4" >&2; return 1; }
           printf '%s\n' "$FAKE_NETNS_RESOLVES_TO" ;;
       esac ;;
     *com.docker.compose.project*)   printf '%s\n' "${FAKE_COMPOSE_PROJECT:-}" ;;
-    *) echo "fake docker: unexpected inspect template: $3" >&2; exit 99 ;;
+    *) echo "fake docker: unexpected inspect template: $3" >&2; return 99 ;;
   esac
-  exit 0
+  return 0
 fi
 if [ "$1" = "port" ]; then
-  [ -n "${FAKE_PUBLISHED_PORT:-}" ] || exit 1
+  [ -n "${FAKE_PUBLISHED_PORT:-}" ] || return 1
   printf '0.0.0.0:%s\n' "$FAKE_PUBLISHED_PORT"
-  exit 0
+  return 0
 fi
 
 if [ "$1" = "compose" ] && [ "$2" = "exec" ]; then
@@ -82,7 +83,7 @@ elif [ "$1" = "exec" ]; then
   shift 2            # exec <container>
 else
   echo "fake docker: unexpected command: $*" >&2
-  exit 99
+  return 99
 fi
 
 cmd="$1"; shift
@@ -100,49 +101,49 @@ case "$cmd" in
       WHATSAPP_OPERATOR_BIND)     value="${FAKE_OPERATOR_BIND:-}" ;;
       *) value="" ;;
     esac
-    [ -n "$value" ] || exit 1
+    [ -n "$value" ] || return 1
     printf '%s\n' "$value"
-    exit 0 ;;
+    return 0 ;;
   cat)
-    [ -n "${FAKE_TOKEN_FILE:-}" ] || exit 1
+    [ -n "${FAKE_TOKEN_FILE:-}" ] || return 1
     printf '%s\n' "$FAKE_TOKEN_FILE"
-    exit 0 ;;
+    return 0 ;;
   whatsapp-bridge)
-    [ "$1" = "--operator-status" ] || exit 99
+    [ "$1" = "--operator-status" ] || return 99
     printf "%s\n" "${FAKE_OPERATOR_STATE:-disabled}"
-    exit 0 ;;
+    return 0 ;;
   python)   # the whisper probe, run inside the mcp container
     [ "${FAKE_WHISPER_REACHABLE:-yes}" = "yes" ] || {
-      echo "<urlopen error [Errno 111] Connection refused>"; exit 1; }
-    exit 0 ;;
+      echo "<urlopen error [Errno 111] Connection refused>"; return 1; }
+    return 0 ;;
   wget)
     if [ "${FAKE_PROXY_TRAP:-}" = yes ]; then
       case "$*" in
         *"-Y off"*) ;;
-        *) echo "loopback credential sent to proxy" >&2; exit 77 ;;
+        *) echo "loopback credential sent to proxy" >&2; return 77 ;;
       esac
     fi
     case "$*" in
       *"Bearer ${FAKE_EXPECT_TOKEN}"*) ;;
-      *) echo "wget: server returned error: HTTP/1.1 401 Unauthorized" >&2; exit 1 ;;
+      *) echo "wget: server returned error: HTTP/1.1 401 Unauthorized" >&2; return 1 ;;
     esac
     for url in "$@"; do :; done
     case "$url" in
-      */api/health) printf '%s\n' "${FAKE_HEALTH_BODY}"; exit 0 ;;
+      */api/health) printf '%s\n' "${FAKE_HEALTH_BODY}"; return 0 ;;
       */api/ready)
-        [ "${FAKE_READY:-200}" = "200" ] && { echo ok; exit 0; }
+        [ "${FAKE_READY:-200}" = "200" ] && { echo ok; return 0; }
         echo "wget: server returned error: HTTP/1.1 ${FAKE_READY} Service Unavailable" >&2
-        exit 1 ;;
-      *) echo "fake docker: unexpected url: $url" >&2; exit 99 ;;
+        return 1 ;;
+      *) echo "fake docker: unexpected url: $url" >&2; return 99 ;;
     esac ;;
-  *) echo "fake docker: unexpected exec: $cmd $*" >&2; exit 99 ;;
+  *) echo "fake docker: unexpected exec: $cmd $*" >&2; return 99 ;;
 esac
 """
 
-FAKE_CURL = r"""#!/usr/bin/env bash
+FAKE_CURL = r"""local out hdr url code
 printf '%s\n' "$*" >>"$FAKE_CURL_LOG"
 if [ "${FAKE_NATIVE_PATH_BOUNDARY:-}" = yes ] && [ -n "${MSYS_NO_PATHCONV:-}" ]; then
-  echo "Docker path settings escaped into curl" >&2; exit 77
+  echo "Docker path settings escaped into curl" >&2; return 77
 fi
 out=/dev/null; hdr=/dev/null; url=""
 while [ $# -gt 0 ]; do
@@ -162,7 +163,7 @@ case "$url" in
     else
       : >"$out"
     fi
-    printf '%s' "$code"; exit 0 ;;
+    printf '%s' "$code"; return 0 ;;
   */mcp)
     code="${FAKE_INIT_CODE:-200}"
     if [ "$code" = "200" ]; then
@@ -171,8 +172,8 @@ case "$url" in
     else
       : >"$hdr"; : >"$out"
     fi
-    printf '%s' "$code"; exit 0 ;;
-  *) echo "fake curl: unexpected url: $url" >&2; exit 99 ;;
+    printf '%s' "$code"; return 0 ;;
+  *) echo "fake curl: unexpected url: $url" >&2; return 99 ;;
 esac
 """
 
@@ -189,19 +190,42 @@ class Stack:
         self.script.write_bytes(SMOKE.read_bytes())
         bindir = tmp_path / "bin"
         bindir.mkdir()
+        functions = []
         for name, body in (
             ("docker", FAKE_DOCKER),
             ("curl", FAKE_CURL),
-            ("wget", '#!/usr/bin/env bash\nprintf "%s\\n" "$FAKE_OPERATOR_BODY"\n'),
+            ("wget", 'printf "%s\\n" "$FAKE_OPERATOR_BODY"\n'),
         ):
+            function = f"{name}() {{\n{body}\n}}\n"
+            functions.append(function)
             path = bindir / name
-            path.write_text(body, encoding="utf-8", newline="\n")
+            path.write_text(f'#!/usr/bin/env bash\n{function}{name} "$@"\n', encoding="utf-8", newline="\n")
             path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        # BASH_ENV runs before the script: keep real entry-point semantics while
+        # avoiding a new env/bash interpreter for every fake docker/curl call.
+        # The executable versions remain available on PATH with the same bodies.
+        shell_bin = bindir.as_posix()
+        shell_path = "${PATH:+:$PATH}"
+        if os.name == "nt" and bindir.drive.endswith(":"):
+            shell_bin = f"/{bindir.drive[0].lower()}{shell_bin[2:]}"
+        if os.name == "nt":
+            # These fakes need only Git's tools. Do not repeatedly translate the
+            # host's long Windows PATH (or search its WSL launcher) in each child.
+            git_root = Path(BASH).parent.parent
+            shell_path = "".join(
+                f":/{path.relative_to(git_root).as_posix()}" for path in sorted(git_root.glob("*/bin")) if path.is_dir()
+            )
+        bootstrap = tmp_path / "fake-commands.sh"
+        bootstrap.write_text(
+            f"export PATH={shlex.quote(shell_bin)}{shell_path}\n" + "\n".join(functions),
+            encoding="utf-8",
+            newline="\n",
+        )
         self.docker_log = tmp_path / "docker.log"
         self.curl_log = tmp_path / "curl.log"
         self.env = {
             **os.environ,
-            "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+            "BASH_ENV": bootstrap.as_posix(),
             # tmp_path is not a repository; make sure the script does not find one above it
             # (pytest's --basetemp may sit inside this checkout). Git examines a ceiling
             # directory itself but never moves up into it, so the ceiling is the parent:
@@ -232,13 +256,16 @@ class Stack:
 
     def run(self, *args: str, cwd: Path | None = None, **fakes: str) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
-        return subprocess.run(
-            bash_command(BASH, self.script, *args, bin_dir=self.dir / "bin"),
+        return run_bounded(
+            [BASH, str(self.script), *args],
             cwd=cwd or self.dir,
             env={**self.env, **fakes},
-            capture_output=True,
-            text=True,
-            timeout=60,  # a flag parsed wrong used to spin forever
+            # #840: native Git Bash reached 96.41s before optimization; a repeat
+            # also hit the provisional 120s bound without a Docker Go gate.
+            # 240s gives that observed lower bound 2x scheduling margin; POSIX
+            # keeps its 60s bound. This is a harness bound, not a per-probe wait.
+            # This still catches the missing-value flag loop; timeout kills the tree.
+            timeout=240 if os.name == "nt" else 60,
         )
 
     def docker_calls(self) -> str:

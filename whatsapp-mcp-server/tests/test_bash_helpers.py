@@ -4,6 +4,8 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -212,3 +214,82 @@ def test_default_discovery_is_cached_but_injected_discovery_is_not(monkeypatch):
         assert len(calls) == 3
     finally:
         bash_helpers._default_bash.cache_clear()
+
+
+@pytest.mark.parametrize("status", [0, 7])
+def test_bounded_run_preserves_output_and_exit_status(tmp_path, status):
+    done = bash_helpers.run_bounded(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; print('output'); print('diagnostic', file=sys.stderr); sys.exit({status})",
+        ],
+        cwd=tmp_path,
+        timeout=10,
+    )
+    assert done.returncode == status
+    assert done.stdout == "output\n" and done.stderr == "diagnostic\n"
+
+
+def _assert_child_stopped(pid):
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes as wt
+
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.OpenProcess.argtypes, api.OpenProcess.restype = [wt.DWORD, wt.BOOL, wt.DWORD], wt.HANDLE
+        api.WaitForSingleObject.argtypes, api.WaitForSingleObject.restype = [wt.HANDLE, wt.DWORD], wt.DWORD
+        api.TerminateProcess.argtypes, api.TerminateProcess.restype = [wt.HANDLE, wt.UINT], wt.BOOL
+        api.CloseHandle.argtypes = [wt.HANDLE]
+        handle = api.OpenProcess(0x100001, False, pid)  # SYNCHRONIZE | TERMINATE
+        if not handle:
+            assert ctypes.get_last_error() == 87  # PID no longer exists.
+            return
+        try:
+            stopped = api.WaitForSingleObject(handle, 5000) == 0
+            if not stopped:
+                api.TerminateProcess(handle, 1)  # Independent cleanup if containment regresses.
+            assert stopped, "timeout left a live descendant"
+        finally:
+            api.CloseHandle(handle)
+    else:
+        import signal
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+                state = Path(f"/proc/{pid}/stat")
+                if state.exists() and state.read_text().rpartition(")")[2].split()[0] == "Z":
+                    return  # Dead child awaiting reaping, with all pipes closed.
+            except ProcessLookupError:
+                return
+            time.sleep(0.01)
+        os.kill(pid, signal.SIGKILL)  # Independent cleanup before reporting failure.
+        pytest.fail("timeout left a live descendant")
+
+
+@pytest.mark.parametrize("parent_exits", [False, True])
+def test_bound_kills_descendant_holding_pipes_even_after_parent_exit(tmp_path, parent_exits):
+    # Native Windows startup exhausted an 8s budget before creating child.pid.
+    # Leave startup margin while keeping the child's lifetime beyond cleanup.
+    bound = 30 if sys.platform == "win32" else 3
+    pid_file = tmp_path / "child.pid"
+    program = (
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', \"import time; print('child ready', flush=True); time.sleep(90)\"])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "print('parent ready', flush=True)\n"
+        f"{'sys.exit(0)' if parent_exits else 'time.sleep(90)'}\n"
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            bash_helpers.ScriptTimeout, match=f"{bound}s execution bound; terminated the process tree"
+        ) as error:
+            bash_helpers.run_bounded([sys.executable, "-c", program, str(pid_file)], timeout=bound)
+        assert time.monotonic() - started < bound + 10  # Bounded cleanup, not the child's 90s lifetime.
+        assert "parent ready" in error.value.stdout and "child ready" in error.value.stdout
+    finally:
+        assert pid_file.exists(), "test never reached its descendant startup barrier"
+        _assert_child_stopped(int(pid_file.read_text()))

@@ -2,8 +2,10 @@
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from functools import cache
 from pathlib import Path
 
@@ -75,3 +77,58 @@ def bash_command(
         str(script),
         *args,
     ]
+
+
+class ScriptTimeout(subprocess.TimeoutExpired):
+    def __str__(self):
+        return f"script exceeded its {self.timeout:g}s execution bound; terminated the process tree"
+
+
+def run_bounded(command, *, cwd=None, env=None, timeout):
+    """Capture a script without leaving descendants or inherited pipes on timeout."""
+    deadline = time.monotonic() + timeout
+    job = None
+    if sys.platform == "win32":
+        from tests._windows_job import WindowsJob
+
+        job = WindowsJob()
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            creationflags=0x08000004 if job else 0,  # CREATE_NO_WINDOW | CREATE_SUSPENDED
+            start_new_session=job is None,
+        )
+        if job:
+            job.assign_and_resume(process.pid)
+        try:
+            stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            if job:
+                job.close()
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            stdout, stderr = process.communicate(timeout=10)
+            raise ScriptTimeout(command, timeout, output=stdout, stderr=stderr) from None
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        if job:
+            job.close()
+        if process is not None and process.poll() is None:
+            if job is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+            process.wait(timeout=10)
