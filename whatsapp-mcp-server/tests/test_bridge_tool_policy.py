@@ -50,7 +50,7 @@ def test_bridge_knows_exactly_the_registered_tool_names():
 def test_endpoint_map_covers_every_mutating_tool():
     """A tool with a WhatsApp side effect reaches it through one of these paths."""
     mapped = set().union(*go_endpoint_tools().values())
-    assert mapped == set(mutating_tools())
+    assert mapped == set(mutating_tools()) | {"get_webhook"}
 
 
 def test_unenforced_tools_have_no_endpoint():

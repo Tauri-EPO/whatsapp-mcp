@@ -6477,6 +6477,7 @@ def owner_identity_local() -> dict[str, str | None] | None:
 
 def _bridge_health_status(status: dict[str, Any]) -> dict[str, Any]:
     """/api/health folded into status: ok, paired, connected, reason, problems, pairing."""
+    status["webhook"] = _webhook_status(None, "runtime webhook status unavailable: bridge unreachable")
     try:
         health = _bridge_request("GET", "/health", timeout=10)
     except ToolError as exc:
@@ -6487,8 +6488,10 @@ def _bridge_health_status(status: dict[str, Any]) -> dict[str, Any]:
     except (json.JSONDecodeError, ValueError):
         body = {}
     if health.status_code != 200 or not isinstance(body, dict):
+        status["webhook"] = _webhook_status(None, "runtime webhook status unavailable: invalid bridge health response")
         status["reason"] = f"/api/health answered HTTP {health.status_code}"
         return status
+    status["webhook"] = _webhook_status(body.get("webhook"))
     status.update(
         {
             "status": body.get("status"),
@@ -6539,6 +6542,80 @@ def _bridge_health_status(status: dict[str, Any]) -> dict[str, Any]:
         status["ok"] = False
         status["reason"] = f"WhatsApp pairing step: {pairing_state}; operator intervention required; see docs/DOCKER.md"
     return status
+
+
+WEBHOOK_STATUS_FIELDS = (
+    "configured",
+    "enabled",
+    "consecutive_failures",
+    "reason",
+    "url",
+    "last_success",
+    "queued",
+    "dropped",
+)
+WEBHOOK_FILTER_FIELDS = ("events", "forward_self", "forward_channels", "forward_broadcasts", "authorization_set")
+
+
+def _webhook_status(
+    view: Any, reason: str = "runtime webhook status unavailable: bridge did not return the view"
+) -> dict[str, Any]:
+    """Allow-list the bridge's sanitized view; never contact the operator listener."""
+    if not isinstance(view, dict) or not all(field in view for field in WEBHOOK_STATUS_FIELDS):
+        return {"configured": None, "enabled": None, "consecutive_failures": None, "reason": reason}
+    return {field: view[field] for field in (*WEBHOOK_STATUS_FIELDS, *WEBHOOK_FILTER_FIELDS) if field in view}
+
+
+def get_webhook() -> dict[str, Any]:
+    """Read only the bridge-masked, allow-listed runtime webhook view."""
+    body = _webhook_response("GET", "/webhook")
+    if not all(field in body for field in (*WEBHOOK_STATUS_FIELDS, *WEBHOOK_FILTER_FIELDS)):
+        raise ToolError("bridge_unavailable", "Bridge returned an invalid runtime webhook view")
+    return _webhook_status(body)
+
+
+def test_webhook() -> dict[str, Any]:
+    """Use the existing bounded synthetic delivery; never call operator REST."""
+    body = _webhook_response("POST", "/webhook/test", timeout=15)
+    if not all(field in body for field in ("delivered", "reason", "event_id")):
+        raise ToolError("bridge_unavailable", "Bridge returned an invalid runtime webhook test result")
+    reason = body["reason"]
+    if not isinstance(reason, str) or (
+        reason
+        not in (
+            "",
+            "receiver_refused",
+            "request_failed",
+            "delivery_failed",
+            "cancelled",
+            "disabled",
+            "configuration_changed",
+        )
+        and re.fullmatch(r"http_[1-5][0-9]{2}", reason) is None
+    ):
+        raise ToolError("bridge_unavailable", "Bridge returned an invalid runtime webhook test reason")
+    return {field: body[field] for field in ("delivered", "reason", "event_id")}
+
+
+def _webhook_response(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    response = _bridge_request(method, path, **kwargs)
+    # Fixed messages keep even an unexpected error body from echoing a receiver
+    # URL or credential. The successful view/test are sanitized by the bridge.
+    if response.status_code == 404:
+        raise ToolError("not_found", "Runtime webhook is disabled or unavailable on this bridge")
+    if response.status_code == 409:
+        raise ToolError("conflict", "Configure an enabled webhook first through the private operator listener")
+    if response.status_code in (401, 403):
+        raise ToolError("denied", "Runtime webhook access denied by the bridge")
+    if response.status_code != 200:
+        raise ToolError("bridge_unavailable", "Runtime webhook request failed")
+    try:
+        body = response.json()
+    except (ValueError, json.JSONDecodeError):
+        body = None
+    if not isinstance(body, dict):
+        raise ToolError("bridge_unavailable", "Bridge returned an invalid runtime webhook response")
+    return body
 
 
 # Connection problems that block the account (bridge connection_problem.kind).

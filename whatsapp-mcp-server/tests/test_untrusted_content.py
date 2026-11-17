@@ -100,6 +100,8 @@ EXPECTED_UNTRUSTED = {
 # The rest: they return counts, timestamps, paths, status flags or an echo of
 # what this agent itself just wrote — nothing a third party authored.
 EXPECTED_TRUSTED = {
+    "get_webhook",
+    "test_webhook",
     "create_group",
     "get_message_receipts",
     "label_chat",
