@@ -31,26 +31,15 @@ import (
 
 const fakeWebhookSecret = "0123456789abcdef-Fake-Webhook-Secret"
 
-func TestWebhookStartupMessageRuntime(t *testing.T) {
-	for _, legacyEnabled := range []bool{false, true} {
-		t.Run(strconv.FormatBool(legacyEnabled), func(t *testing.T) {
-			b, server, destination, _, _ := runtimeWebhookFixture(t, nil)
-			switches := testSwitches()
-			switches.WebhookEnabled = legacyEnabled
-			legacy := webhookStartupMessage(switches, nil)
-			if got, want := webhookStartupMessage(switches, b.RuntimeWebhook), legacy+"; runtime webhook: not configured (process-local destination not set)"; got != want {
-				t.Fatalf("unconfigured startup message = %q, want %q", got, want)
-			}
-			configureWebhookHTTP(t, server, destination)
-			if got, want := webhookStartupMessage(switches, b.RuntimeWebhook), legacy+"; runtime webhook: configured"; got != want {
-				t.Fatalf("configured startup message = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
 func TestRuntimeWebhookConfigurationLog(t *testing.T) {
 	b, server, destination, _, logger := runtimeWebhookFixture(t, nil)
+	globalLogger := installRecordingLogger(t)
+	receiverURL, err := url.Parse(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiverURL.Path = "/private-receiver-path"
+	destination = receiverURL.String()
 	const authorization = "Bearer fake-receiver-authorization"
 	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": authorization}); code != 200 {
 		t.Fatalf("configure=%d %s", code, data)
@@ -58,13 +47,26 @@ func TestRuntimeWebhookConfigurationLog(t *testing.T) {
 	if code, _ := configureWebhookFields(t, server, "http://example.com", nil); code != 400 {
 		t.Fatalf("invalid configuration status=%d, want 400", code)
 	}
-	logs := logger.String()
-	if strings.Count(logs, "[INFO] Runtime webhook configured\n") != 1 {
-		t.Fatalf("missing single INFO configuration log: %s", logs)
+	fingerprint := b.RuntimeWebhook.snapshot().Fingerprint
+	if code, _ := webhookOperatorRequest(t, server, "DELETE", "/operator/v1/webhook", ""); code != 204 {
+		t.Fatalf("delete status=%d, want 204", code)
 	}
-	for _, private := range []string{destination, fakeWebhookSecret, authorization, fakeOperatorToken, b.RuntimeWebhook.snapshot().Fingerprint} {
-		if strings.Contains(logs, private) {
-			t.Fatal("configuration log contains private receiver data")
+	if b.RuntimeWebhook.configured() {
+		t.Fatal("successful DELETE retained the receiver")
+	}
+	logs := logger.String()
+	for _, message := range []string{"Runtime webhook configured", "Runtime webhook disabled"} {
+		line := "[INFO] " + message + "\n"
+		if strings.Count(logs, line) != 1 {
+			t.Fatalf("missing single instance INFO lifecycle log: %s", logs)
+		}
+		if strings.Contains(globalLogger.String(), message) {
+			t.Fatal("lifecycle log used the package logger instead of the instance logger")
+		}
+	}
+	for _, private := range []string{receiverURL.Hostname(), receiverURL.Path, fakeWebhookSecret, authorization, fakeOperatorToken, fingerprint} {
+		if strings.Contains(logs, private) || strings.Contains(globalLogger.String(), private) {
+			t.Fatal("PUT/DELETE logs contain private receiver data")
 		}
 	}
 }

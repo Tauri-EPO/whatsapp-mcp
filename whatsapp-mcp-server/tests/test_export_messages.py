@@ -175,12 +175,13 @@ def test_allow_list_filters_rows_and_refuses_a_blocked_chat(store, monkeypatch):
     assert exc.value.code == "denied"
 
 
-def test_unsupported_format_and_unknown_fields_are_rejected(store):
+@pytest.mark.parametrize("unknown_field", ["nope", "is_context"])
+def test_unsupported_format_and_unknown_fields_are_rejected(store, unknown_field):
     with pytest.raises(whatsapp.ToolError) as exc:
         export.export_messages(format="csv")
     assert exc.value.code == "invalid_argument"
     with pytest.raises(whatsapp.ToolError) as exc:
-        export.export_messages(fields=["id", "nope"])
+        export.export_messages(fields=["id", unknown_field])
     assert exc.value.code == "invalid_argument"
 
 

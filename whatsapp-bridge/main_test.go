@@ -2004,14 +2004,29 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 }
 
 func TestWebhookStartupMessage(t *testing.T) {
-	t.Setenv("WEBHOOK_ENABLED", "false")
-	if got, want := webhookStartupMessage(testSwitches(), nil), "WEBHOOK_ENABLED=false: outbound webhooks disabled"; got != want {
-		t.Errorf("disabled startup message = %q, want %q", got, want)
-	}
-
-	t.Setenv("WEBHOOK_ENABLED", "true")
-	if got, want := webhookStartupMessage(testSwitches(), nil), "FORWARD_SELF enabled: forwarding self messages to webhook; status updates are not forwarded (WEBHOOK_FORWARD_STATUS); channels forwarded=false (WEBHOOK_FORWARD_CHANNELS); broadcast lists forwarded=false (WEBHOOK_FORWARD_BROADCASTS)"; got != want {
-		t.Errorf("enabled startup message = %q, want %q", got, want)
+	const forwarding = "; status updates are not forwarded (WEBHOOK_FORWARD_STATUS); channels forwarded=false (WEBHOOK_FORWARD_CHANNELS); broadcast lists forwarded=false (WEBHOOK_FORWARD_BROADCASTS)"
+	for _, legacy := range []struct {
+		name, message string
+		enabled, self bool
+	}{
+		{"disabled", "WEBHOOK_ENABLED=false: outbound webhooks disabled", false, false},
+		{"forward self", "FORWARD_SELF enabled: forwarding self messages to webhook" + forwarding, true, true},
+		{"exclude self", "FORWARD_SELF disabled: self messages will NOT be forwarded" + forwarding, true, false},
+	} {
+		for _, runtime := range []struct {
+			name, message string
+			enabled       bool
+		}{
+			{"disabled", "; runtime webhook disabled", false},
+			{"enabled", "; runtime webhook enabled: no destination yet (set via PUT /operator/v1/webhook)", true},
+		} {
+			t.Run(legacy.name+"/runtime "+runtime.name, func(t *testing.T) {
+				switches := bridgeSwitches{WebhookEnabled: legacy.enabled, ForwardSelf: legacy.self}
+				if got, want := webhookStartupMessage(switches, runtime.enabled), "Legacy webhook: "+legacy.message+runtime.message; got != want {
+					t.Errorf("startup message = %q, want %q", got, want)
+				}
+			})
+		}
 	}
 }
 

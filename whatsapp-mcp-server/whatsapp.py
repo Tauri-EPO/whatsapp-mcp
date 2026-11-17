@@ -1306,8 +1306,9 @@ MESSAGE_FIELDS: tuple[str, ...] = (
     "content_truncated",
     "original_content_truncated",
     "matched_original",
-    "is_context",
 )
+# Only list_messages mixes page hits with neighbouring rows.
+LIST_MESSAGES_FIELDS: tuple[str, ...] = (*MESSAGE_FIELDS, "is_context")
 # "notes" is on every chat row, whichever listing produced it.
 _CHAT_ROW_FIELDS: tuple[str, ...] = (
     *chat_to_dict(Chat(jid="", name=None, last_message_time=None)),
@@ -1377,8 +1378,9 @@ def shape_rows(
     did not ask for it, because losing that flag would make the truncated text
     look complete. Message rows also truncate `original_content`, with its own
     `original_content_truncated` flag retained under the same projection rule.
-    `matched_original` and `is_context` also survive projections so search hits
-    and surrounding non-hits remain distinguishable.
+    `matched_original` and `is_context` also survive projections so page hits
+    and their neighbours remain distinguishable. Explicitly selecting
+    `is_context` reports False on hits; omit_nulls may drop that False.
     """
     selected = validate_fields(fields, known)
     limit = int(max_content_chars) if max_content_chars is not None else None
@@ -1390,6 +1392,8 @@ def shape_rows(
     shaped: list[dict[str, Any]] = []
     for row in rows:
         out = dict(row)
+        if selected is not None and "is_context" in selected:
+            out.setdefault("is_context", False)
         text_fields = [(content_key, "content_truncated")]
         if content_key == "content":
             text_fields.append(("original_content", "original_content_truncated"))
@@ -3053,8 +3057,10 @@ def list_messages_page(
             what was said in it and is ranked with the written hits.
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
-        include_context: Include surrounding rows outside the filters and limit,
-            marked is_context=True (default True); False returns hits only
+        include_context: Include neighbours of this page's hits, marked is_context=True
+            (default True). Neighbours are not checked against the hit filters or
+            counted in limit; they may match and become hits on another page.
+            False returns hits only.
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
         sort_by: Sort order - "newest" (default), "oldest" for chronological ordering, or

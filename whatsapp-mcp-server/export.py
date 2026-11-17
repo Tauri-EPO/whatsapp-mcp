@@ -47,7 +47,6 @@ PAGE_ONLY_FIELDS = (
     "original_content_truncated",
     "message_notes",
     "matched_original",
-    "is_context",
 )
 EXPORT_FIELDS = tuple(name for name in whatsapp.MESSAGE_FIELDS if name not in PAGE_ONLY_FIELDS)
 

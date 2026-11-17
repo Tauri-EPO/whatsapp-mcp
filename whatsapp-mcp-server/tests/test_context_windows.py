@@ -124,11 +124,52 @@ def test_context_outside_time_bound_and_limit(
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
     kwargs = {bound: "2026-11-17T11:00:00Z", "chat_jid": CHAT_A, "limit": 1, "sort_by": sort_by, "fields": fields}
     rows = main.list_messages(**kwargs)["items"]
+    assert [(row["id"], row.get("is_context")) for row in rows] == [
+        ("poll", True if context == "poll" else None),
+        ("new", True if context == "new" else None),
+    ]
+    if fields is None:
+        expected = main.list_messages(chat_jid=CHAT_A, sort_by="oldest", include_context=False)["items"]
+        for row in expected:
+            if row["id"] == context:
+                row["is_context"] = True
+        assert rows == expected
+    else:
+        assert rows == [
+            {"id": "poll", "media_type": "poll", **({"is_context": True} if context == "poll" else {})},
+            {"id": "new", "media_type": new_media_type, **({"is_context": True} if context == "new" else {})},
+        ]
     assert [row["id"] for row in rows if not row.get("is_context")] == [hit]
     assert [row["id"] for row in rows if row.get("is_context") is True] == [context]
     hits_only = main.list_messages(**kwargs, include_context=False)["items"]
     assert [row["id"] for row in hits_only] == [hit]
     assert "is_context" not in hits_only[0]
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+def test_matching_neighbour_becomes_unmarked_hit_on_next_page(db, sort_by):
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM messages WHERE chat_jid != ? OR id NOT IN ('a1', 'a2')", (CHAT_A,))
+    kwargs = {"chat_jid": CHAT_A, "query": "A msg", "limit": 1, "sort_by": sort_by}
+    first = main.list_messages(**kwargs)
+    assert first["has_more"]
+    hit, neighbour = ("a1", "a2") if sort_by == "oldest" else ("a2", "a1")
+    expected = [{"id": hit}, {"id": neighbour, "is_context": True}]
+    if sort_by == "newest":
+        expected.reverse()
+    assert [{key: row[key] for key in ("id", "is_context") if key in row} for row in first["items"]] == expected
+    second = main.list_messages(**kwargs, cursor=first["next_cursor"])
+    assert not second["has_more"]
+    assert [row["id"] for row in second["items"] if not row.get("is_context")] == [neighbour]
+    assert "is_context" not in next(row for row in second["items"] if row["id"] == neighbour)
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+def test_marker_only_projection_distinguishes_hits_and_neighbours(db, sort_by):
+    kwargs = {"chat_jid": CHAT_A, "query": "hit", "limit": 1, "sort_by": sort_by, "fields": ["is_context"]}
+    assert main.list_messages(**kwargs)["items"] == [{"is_context": True}, {"is_context": False}, {"is_context": True}]
+    assert main.list_messages(**kwargs, include_context=False)["items"] == [{"is_context": False}]
+    assert main.list_messages(**kwargs, omit_nulls=True)["items"] == [{"is_context": True}, {}, {"is_context": True}]
 
 
 @pytest.mark.parametrize("sort_by", ["oldest", "newest"])

@@ -242,6 +242,36 @@ func captureStartupOutput(t *testing.T, start func() int) (int, string) {
 	return exit, string(output)
 }
 
+func TestWebhookStartupLoggedBeforeStoreFailure(t *testing.T) {
+	for _, runtimeEnabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(runtimeEnabled), func(t *testing.T) {
+			blocked := filepath.Join(t.TempDir(), "blocked-store")
+			if err := os.WriteFile(blocked, []byte("not a directory"), storeFileMode); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(storeDirEnv, blocked)
+			cfg, err := parseBridgeConfig(func(string) string { return "" })
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Switches.WebhookEnabled = false
+			cfg.RuntimeWebhook.Enabled = runtimeEnabled
+			exit, output := captureStartupOutput(t, func() int { return runBridge(cfg) })
+			line, failure := strings.Index(output, "Legacy webhook:"), strings.Index(output, "Failed to create store directory")
+			if exit != 1 || line < 0 || failure < line {
+				t.Fatalf("webhook state was not logged before store refusal: exit=%d output=%s", exit, output)
+			}
+			state := "runtime webhook disabled"
+			if runtimeEnabled {
+				state = "runtime webhook enabled: no destination yet (set via PUT /operator/v1/webhook)"
+			}
+			if !strings.Contains(output, state) {
+				t.Fatalf("early startup omitted runtime state: %s", output)
+			}
+		})
+	}
+}
+
 // This invokes the same function main invokes, including logger installation.
 // Creating store/ or taking its instance lock before validation fails this test.
 func TestRunRejectsInvalidConfigBeforeEffects(t *testing.T) {
