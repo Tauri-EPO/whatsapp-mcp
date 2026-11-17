@@ -761,7 +761,7 @@ func (b *Bridge) handleRuntimeWebhookTest(w http.ResponseWriter, r *http.Request
 	stop := context.AfterFunc(g.ctx, cancel)
 	defer stop()
 	ok, reason := rw.attempt(ctx, g, d)
-	writeJSON(w, 200, map[string]any{"delivered": ok, "reason": reason, "event_id": d.id})
+	writeJSON(w, 200, map[string]any{"delivered": ok, "reason": safeWebhookReason(reason), "event_id": d.id})
 }
 
 func (b *Bridge) queueRuntimeMessage(g *runtimeWebhookGeneration, event runtimeWebhookEvent) {

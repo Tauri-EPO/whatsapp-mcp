@@ -432,7 +432,7 @@ Copy `.env.example` to `.env` and configure as needed. The bridge validates star
 | `WHATSAPP_ALLOW_TOOLS`  | *(unset = every tool)*                   | Comma-separated tool names to offer, everything else is hidden (reads included); the bridge answers `403` on the endpoints of the tools left out. Set for **both** processes. See [Per-tool allow/deny](#per-tool-allowdeny) |
 | `WHATSAPP_DENY_TOOLS`   | *(unset)*                                | Comma-separated tool names never to offer, enforced on both processes. Wins over `WHATSAPP_ALLOW_TOOLS`; `WHATSAPP_READ_ONLY` wins over both |
 | `WHATSAPP_WRAP_UNTRUSTED` | *(unset = off)*                       | MCP server only: wrap third-party text in the results (`content`, `last_message`, transcripts, note values, group `topic`, poll `question`) in `<untrusted>…</untrusted>` delimiters. Name fields, topics and questions are sanitised in every mode, set or not. See [Marking message content as untrusted](#marking-message-content-as-untrusted) |
-| `WHATSAPP_STATUS_DETAIL` | `true` | MCP server only: allow `bridge_status(detail=true)` to return deployment internals (bridge URL, own phone/LID, build, whisper backend, cache sizes, send usage, endpoint certificate). The default answer is minimal either way; `false` keeps it minimal even when an agent asks for detail. Strict boolean; anything else stops the server |
+| `WHATSAPP_STATUS_DETAIL` | `true` | MCP server only: allow `bridge_status(detail=true)` and `get_webhook` to return deployment internals (bridge URL, own phone/LID, build, whisper backend, cache sizes, send usage, endpoint certificate, masked runtime webhook URL and delivery counters). The default status answer is minimal either way; `false` keeps both tools compact even when an agent asks for detail, including hiding receiver URL, events, forwarding filters and delivery counters. Strict boolean; anything else stops the server |
 | `WHATSAPP_MEDIA_INLINE` | `resource`                              | MCP server only: how `read_media` returns a PDF, DOCX, XLSX, video or archive. Every answer starts with a text block carrying the type, size, `sha256` and how to read the file another way. `resource` (default) then sends an `EmbeddedResource`; `base64` sends the first 1 MiB chunk as base64 text (continue with `as_base64=true` at `next_offset`); `text` extracts PDF/DOCX/XLSX text and uses `base64` for other types or an unreadable document; neither adds a `resource_link`. Pick `base64` or `text` for a client that delivers resource blobs as corrupted text (issue #791). Any other value stops the server |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 | `WHISPER_URL`          | *(unset)*                                | whisper.cpp `whisper-server` inference endpoint for `transcribe_audio` (`http://127.0.0.1:8178/inference` with the `whisper` compose profile, `http://whisper:8178/inference` with the [shared whisper](DOCKER.md#sharing-one-whisper-between-stacks)) |
@@ -658,14 +658,14 @@ Why this matters: an agent that reads any group or forwarded message is reading
 attacker-controlled text. Told "never send without approval", it is one prompt
 injection away from sending. With read-only on there is no send tool to call.
 
-**Blocked** (20 tools / 18 endpoints): `send_message`, `send_file`,
+**Blocked** (22 tools / 20 endpoints): `send_message`, `send_file`,
 `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`,
 `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`,
 `manage_group_participants`, `update_group`, `get_group_invite_link`,
-`leave_group`, `purge_media`, `request_history`; on the bridge `/api/send`, `/api/react`,
+`leave_group`, `purge_media`, `request_history`, `create_group`, `test_webhook`; on the bridge `/api/send`, `/api/react`,
 `/api/typing`, `/api/chat/archive`, `/api/chat/delete`, `/api/block`, `/api/chat/label`, `/api/mark-read`, `/api/delete`, `/api/delete-for-me`, `/api/edit`, `/api/forward`,
 `/api/group/participants`, `/api/group/subject`, `/api/group/invite`,
-`/api/group/leave`, `/api/media/purge`, `/api/history`.
+`/api/group/leave`, `/api/media/purge`, `/api/history`, `/api/group/create`, `/api/webhook/test`.
 
 **Still available:** every read tool, plus
 
@@ -744,13 +744,15 @@ WHATSAPP_DENY_TOOLS=delete_message,leave_group,manage_group_participants,purge_m
   like `/api/poll` and `/api/group/members`, so the MCP server is the only place
   it is enforced.
 
+The runtime webhook read is a deliberate sensitive-read exception on the bridge: `get_webhook` / `GET /api/webhook` obeys both tool lists while staying readable under `WHATSAPP_READ_ONLY`. `test_webhook` / `POST /api/webhook/test` obeys the lists and read-only, because it sends a synthetic event to the configured receiver. Neither can change or remove that destination.
+
 ### What each side enforces
 
 | | MCP server (`tool_policy.py`) | Bridge (`tool_policy.go`) |
 |---|---|---|
 | Granularity | one tool | one `/api/*` endpoint |
 | Blocked tool/endpoint | hidden from `tools/list`, `denied` if called anyway | `403` with the same JSON error shape |
-| Reads (`list_messages`, `get_poll_results`, `download_media`, …) | hidden when the lists say so | always served: `/api/poll`, `/api/group/members` and `/api/download` stay open, exactly as in read-only mode |
+| Reads (`list_messages`, `get_poll_results`, `download_media`, …) | hidden when the lists say so | served except the sensitive `get_webhook` read; `/api/poll`, `/api/group/members` and `/api/download` stay open, exactly as in read-only mode |
 | Unknown name | startup error listing the valid names | same |
 
 The bridge translates tool names with a fixed map (`endpointTools` in

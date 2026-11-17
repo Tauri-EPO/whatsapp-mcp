@@ -36,12 +36,13 @@ const (
 	denyToolsEnv  = "WHATSAPP_DENY_TOOLS"
 )
 
-// endpointTools maps every mutating REST endpoint to the MCP tools that call
-// it (whatsapp-mcp-server/whatsapp.py). Keys must stay in step with the
-// endpoints registered through `mutate` in newRESTMux — TestEndpointToolsCoversEveryMutatingEndpoint
-// fails otherwise — and the tool names with the MCP server's, which
-// tests/test_bridge_tool_policy.py checks from the Python side.
+// endpointTools maps mutating endpoints and the sensitive webhook read to
+// their MCP tools. TestEndpointToolsCoversEveryMutatingEndpoint checks every
+// mutate registration plus that read; tests/test_bridge_tool_policy.py checks
+// the names against the MCP registry.
 var endpointTools = map[string][]string{
+	"/api/webhook":            {"get_webhook"},
+	"/api/webhook/test":       {"test_webhook"},
 	"/api/group/create":       {"create_group"},
 	"/api/send":               {"send_message", "send_file", "send_audio_message"},
 	"/api/react":              {"send_reaction"},

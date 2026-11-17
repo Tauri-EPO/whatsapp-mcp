@@ -472,7 +472,7 @@ class _BridgeHTTP:
 bridge_http = _BridgeHTTP()
 
 
-def _bridge_request(method: str, path: str, *, timeout: float | None = None, **kwargs):
+def _bridge_request(method: str, path: str, *, timeout: float | None = None, redact_errors: bool = False, **kwargs):
     """Call the bridge REST API with a timeout and a short retry on connection errors.
 
     Only errors raised before any bytes reach the bridge (connection refused,
@@ -489,11 +489,20 @@ def _bridge_request(method: str, path: str, *, timeout: float | None = None, **k
             return fn(url, **kwargs)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             if attempt >= BRIDGE_CONNECT_RETRIES:
+                if redact_errors:
+                    raise ToolError("bridge_unavailable", "Bridge unreachable") from None
                 raise ToolError("bridge_unavailable", f"bridge unreachable at {WHATSAPP_API_BASE_URL}: {exc}") from exc
             delay = BRIDGE_RETRY_BACKOFF_S * (2**attempt)
-            logger.warning("Bridge unreachable (%s), retrying in %.1fs: %s", path, delay, exc)
+            logger.warning(
+                "Bridge unreachable (%s), retrying in %.1fs: %s",
+                path,
+                delay,
+                "connection failed" if redact_errors else exc,
+            )
             time.sleep(delay)
         except httpx.HTTPError as exc:
+            if redact_errors:
+                raise ToolError("bridge_unavailable", "Bridge request failed") from None
             raise ToolError("bridge_unavailable", f"bridge request failed ({path}): {exc}") from exc
     raise AssertionError("unreachable")
 
@@ -6493,6 +6502,7 @@ def owner_identity_local() -> dict[str, str | None] | None:
 
 def _bridge_health_status(status: dict[str, Any]) -> dict[str, Any]:
     """/api/health folded into status: ok, paired, connected, reason, problems, pairing."""
+    status["webhook"] = _webhook_status(None, "runtime webhook status unavailable: bridge unreachable")
     try:
         health = _bridge_request("GET", "/health", timeout=10)
     except ToolError as exc:
@@ -6503,8 +6513,10 @@ def _bridge_health_status(status: dict[str, Any]) -> dict[str, Any]:
     except (json.JSONDecodeError, ValueError):
         body = {}
     if health.status_code != 200 or not isinstance(body, dict):
+        status["webhook"] = _webhook_status(None, "runtime webhook status unavailable: invalid bridge health response")
         status["reason"] = f"/api/health answered HTTP {health.status_code}"
         return status
+    status["webhook"] = _webhook_status(body.get("webhook"))
     status.update(
         {
             "status": body.get("status"),
@@ -6557,6 +6569,105 @@ def _bridge_health_status(status: dict[str, Any]) -> dict[str, Any]:
     return status
 
 
+WEBHOOK_COMPACT_FIELDS = ("configured", "enabled", "consecutive_failures", "reason")
+WEBHOOK_STATUS_FIELDS = (*WEBHOOK_COMPACT_FIELDS, "url", "last_success", "queued", "dropped")
+WEBHOOK_FILTER_FIELDS = (
+    "events",
+    "forward_self",
+    "forward_status",
+    "forward_channels",
+    "forward_broadcasts",
+    "authorization_set",
+)
+
+
+def _safe_webhook_reason(reason: Any) -> str:
+    if isinstance(reason, str) and (
+        reason
+        in (
+            "",
+            "receiver_refused",
+            "request_failed",
+            "delivery_failed",
+            "cancelled",
+            "disabled",
+            "configuration_changed",
+            "expired",
+            "payload_limit",
+            "queue_full",
+            "runtime webhook disabled",
+            "runtime webhook has no destination",
+            "runtime webhook reason unavailable",
+        )
+        or re.fullmatch(r"http_[0-9]{3}", reason) is not None
+    ):
+        return reason
+    return "runtime webhook reason unavailable"
+
+
+def _webhook_status(
+    view: Any,
+    reason: str = "runtime webhook status unavailable: bridge did not return the view",
+    *,
+    detail: bool = False,
+) -> dict[str, Any]:
+    """Allow-list the compact health or protected detailed view; sanitize reasons."""
+    if not isinstance(view, dict) or not all(field in view for field in WEBHOOK_COMPACT_FIELDS):
+        return {"configured": None, "enabled": None, "consecutive_failures": None, "reason": reason}
+    fields = (*WEBHOOK_STATUS_FIELDS, *WEBHOOK_FILTER_FIELDS) if detail else WEBHOOK_COMPACT_FIELDS
+    out = {field: view[field] for field in fields if field in view}
+    out["reason"] = _safe_webhook_reason(out["reason"])
+    return out
+
+
+def get_webhook(detail: bool = True) -> dict[str, Any]:
+    """Read the policy-protected view, compact when hosting refuses detail."""
+    body = _webhook_response("GET", "/webhook")
+    if not all(field in body for field in (*WEBHOOK_STATUS_FIELDS, *WEBHOOK_FILTER_FIELDS)):
+        raise ToolError("bridge_unavailable", "Bridge returned an invalid runtime webhook view")
+    return _webhook_status(body, detail=detail)
+
+
+def test_webhook() -> dict[str, Any]:
+    """Use the existing bounded synthetic delivery; never call operator REST."""
+    body = _webhook_response("POST", "/webhook/test", timeout=15)
+    if not all(field in body for field in ("delivered", "reason", "event_id")):
+        raise ToolError("bridge_unavailable", "Bridge returned an invalid runtime webhook test result")
+    return {
+        "delivered": body["delivered"],
+        "reason": _safe_webhook_reason(body["reason"]),
+        "event_id": body["event_id"],
+    }
+
+
+def _webhook_response(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    try:
+        response = _bridge_request(method, path, redact_errors=True, **kwargs)
+    except ToolError as exc:
+        raise ToolError(exc.code, "Runtime webhook bridge request unavailable") from None
+    # Never echo response bodies or receiver diagnostics, even on error paths.
+    if response.status_code == 409:
+        raise ToolError(
+            "webhook_not_ready",
+            "Runtime webhook has no enabled destination; only the operator can configure or re-enable it",
+        )
+    if response.status_code != 200:
+        code = _bridge_error_code(response.status_code)
+        message = {
+            404: "Runtime webhook is disabled or unavailable on this bridge",
+            401: "Bridge rejected its credential for runtime webhook access",
+            403: "Runtime webhook access denied by the bridge",
+        }.get(response.status_code, "Runtime webhook request failed")
+        raise ToolError(code, message)
+    try:
+        body = response.json()
+    except (ValueError, json.JSONDecodeError):
+        body = None
+    if not isinstance(body, dict):
+        raise ToolError("bridge_unavailable", "Bridge returned an invalid runtime webhook response")
+    return body
+
+
 # Connection problems that block the account (bridge connection_problem.kind).
 BLOCKING_CONNECTION_PROBLEMS = ("banned", "locked", "client_outdated", "temporarily_banned")
 
@@ -6589,6 +6700,16 @@ def bridge_status(minimal: bool = False) -> dict[str, Any]:
     status = _bridge_health_status(status)
     if "connected" not in status:
         return status
+    # Health never authorizes detailed webhook inspection. A denied or older
+    # route leaves the compact state intact and never changes WhatsApp's ok.
+    if status["webhook"].get("configured") is not None:
+        from tool_policy import active_policy
+
+        try:
+            if active_policy().allows("get_webhook"):
+                status["webhook"] = get_webhook()
+        except ToolError:
+            pass
     try:
         version = _bridge_request("GET", "/version", timeout=10)
         if version.status_code == 200:

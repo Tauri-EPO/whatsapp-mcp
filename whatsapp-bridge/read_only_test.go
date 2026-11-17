@@ -104,6 +104,7 @@ var readOnlyMutatingEndpoints = []struct {
 	{"/api/group/create", `{"name":"Alice","participants":["5511999999999"]}`},
 	{"/api/media/purge", `{"chat_jid":"5511999999999@s.whatsapp.net","dry_run":false}`},
 	{"/api/history", `{"chat_jid":"5511999999999@s.whatsapp.net","count":50}`},
+	{"/api/webhook/test", `{}`},
 }
 
 func TestReadOnlyRefusesMutatingEndpoints(t *testing.T) {
