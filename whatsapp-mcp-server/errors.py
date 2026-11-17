@@ -19,6 +19,8 @@ fields — retrying will not help),
 retrying this row will not help, but other copies remain fetchable),
 ``media_retry_backoff`` (the sender's phone was asked for this file recently and
 did not deliver it; asking again before ``retry_after_s`` would not reach it),
+``webhook_not_ready`` (no enabled runtime receiver; only the operator can
+configure or re-enable it, so repeating the test cannot fix it),
 ``invalid_argument`` (bad input), ``conflict`` (the target changed since the
 caller read it; re-read and retry), ``too_large`` (the answer would not fit: the
 payload carries the real size and the limit that was applied), ``internal``
@@ -54,6 +56,7 @@ ERROR_CODES = (
     "media_retry_backoff",
     "invalid_argument",
     "conflict",
+    "webhook_not_ready",
     "too_large",
     "internal",
 )

@@ -6,7 +6,8 @@ package main
 // may act on; WHATSAPP_READ_ONLY restricts *what it may do*. When set, every
 // endpoint with an external side effect answers 403 with the shared JSON error
 // shape: send, react, typing, chat/archive, chat/delete, chat/label, block, mark-read, delete, delete-for-me, edit, forward, the four group
-// endpoints, group creation, media purge and the on-demand history request.
+// endpoints, group creation, media purge, the on-demand history request and
+// the synthetic runtime webhook test.
 //
 // The MCP server enforces the same variable on its tools (tool_policy.py) and
 // hides them from tools/list, so a model never sees them. This second check is
@@ -42,7 +43,7 @@ func (p readOnlyPolicy) Summary() string {
 		return readOnlyEnv + " unset: outbound endpoints enabled"
 	}
 	return readOnlyEnv + "=1: read-only, every mutating endpoint answers 403 " +
-		"(send, react, typing, chat/archive, chat/delete, chat/label, block, mark-read, delete, delete-for-me, edit, forward, group/*, media/purge, history)"
+		"(send, react, typing, chat/archive, chat/delete, chat/label, block, mark-read, delete, delete-for-me, edit, forward, group/*, media/purge, history, webhook/test)"
 }
 
 // guard wraps a handler with a side effect: 403 while read-only, pass-through

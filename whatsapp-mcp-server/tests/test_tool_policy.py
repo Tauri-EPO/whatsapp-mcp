@@ -27,6 +27,7 @@ from tool_policy import (
 # The contract this feature promises. Kept spelled out so a tool that quietly
 # loses its @mutating_tool decorator fails here instead of in production.
 EXPECTED_MUTATING = {
+    "test_webhook",
     "create_group",
     "label_chat",
     "archive_chat",
@@ -52,6 +53,7 @@ EXPECTED_MUTATING = {
 
 # Reads (and local-only writes) that must survive read-only mode.
 EXPECTED_READABLE = {
+    "get_webhook",
     "get_blocklist",
     "list_labels",
     "list_messages",

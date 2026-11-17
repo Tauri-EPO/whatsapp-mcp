@@ -233,8 +233,9 @@ func TestEndpointToolsCoversEveryMutatingEndpoint(t *testing.T) {
 			t.Errorf("%s is mutating but has no endpointTools row", tc.path)
 		}
 	}
-	if len(endpointTools) != len(readOnlyMutatingEndpoints) {
-		t.Errorf("endpointTools has %d rows, read-only covers %d endpoints",
+	// get_webhook is a sensitive read: tool policy applies, read-only does not.
+	if len(endpointTools) != len(readOnlyMutatingEndpoints)+1 || len(endpointTools["/api/webhook"]) != 1 || endpointTools["/api/webhook"][0] != "get_webhook" {
+		t.Errorf("endpointTools has %d rows, read-only covers %d endpoints plus the webhook read",
 			len(endpointTools), len(readOnlyMutatingEndpoints))
 	}
 }

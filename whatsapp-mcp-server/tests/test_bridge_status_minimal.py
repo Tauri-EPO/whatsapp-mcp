@@ -17,6 +17,7 @@ FULL_OK = {
     "version": {"version": "dev", "commit": "abc"},
     "owner": {"jid": "5511999999999@s.whatsapp.net", "phone": "5511999999999", "lid": "100000000000001"},
     "transcription_usage": {"seconds": 60, "minutes": 1.0},
+    "webhook": whatsapp._webhook_status(None),
 }
 
 INTERNAL_KEYS = {
@@ -32,7 +33,13 @@ INTERNAL_KEYS = {
     "pairing_action",
 }
 
-MINIMAL_OK = {"ok": True, "paired": True, "connected": True, "transcription_configured": True}
+MINIMAL_OK = {
+    "ok": True,
+    "paired": True,
+    "connected": True,
+    "transcription_configured": True,
+    "webhook": whatsapp._webhook_status(None),
+}
 
 
 class FakeStatus:
@@ -91,7 +98,9 @@ def test_malformed_switch_is_rejected(monkeypatch):
 
 
 def _minimal_for(monkeypatch, full_status):
-    monkeypatch.setattr(main, "whatsapp_bridge_status", FakeStatus(full_status))
+    monkeypatch.setattr(
+        main, "whatsapp_bridge_status", FakeStatus({"webhook": whatsapp._webhook_status(None), **full_status})
+    )
     monkeypatch.setattr(main, "transcription_configured", lambda: False)
     monkeypatch.delenv(main.STATUS_DETAIL_ENV, raising=False)
     return main.bridge_status()
@@ -124,6 +133,7 @@ def test_restriction_and_pairing_state_with_a_generic_reason(monkeypatch):
         "pairing_state": "passkey_required",
         "restriction": {"kind": "temporarily_banned", "expires_at": "2026-11-12T10:00:00Z"},
         "transcription_configured": False,
+        "webhook": whatsapp._webhook_status(None),
     }
 
 

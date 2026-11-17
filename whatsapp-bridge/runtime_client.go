@@ -208,7 +208,7 @@ func (b *Bridge) runtimeRESTHandler(port int, token string) http.Handler {
 	var handler http.Handler
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/health", "/api/ready", "/api/version", "/metrics":
+		case "/api/health", "/api/ready", "/api/version", "/metrics", "/api/webhook", "/api/webhook/test":
 			statusMux.ServeHTTP(w, r)
 			return
 		}

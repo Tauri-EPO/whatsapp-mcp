@@ -12,7 +12,7 @@ reason: "quota"` and a subsequent read streams without retaining a cache copy.
 Local paths keep their existing behavior. See
 [Media storage backends](CONFIGURATION.md#media-storage-backends).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `test_webhook` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -137,6 +137,7 @@ the page's items, preserving its pagination envelope.
 | `denied` | `WHATSAPP_ALLOWED_CHATS` blocks that conversation | Ask the operator to extend the allow-list |
 | `group_admin_required` | The group only permits admins to send, and this account is not an admin | Ask a group admin to change the setting or the account's role |
 | `invalid_argument` | Missing or malformed input | Fix the call |
+| `webhook_not_ready` | No enabled runtime webhook receiver | Only the operator can configure or re-enable it; do not repeat the test until that state changes |
 | `conflict` | The note changed since you read it (`annotate(..., if_unchanged_since=...)`) | Read it again, merge, write again |
 | `too_large` | The answer would not fit (`read_media`); the payload also carries `bytes` and `limit`, or `pixels` and `limit` for an image too big to decode | Read a smaller file, or `download_media` when the client shares the filesystem |
 | `bridge_unavailable` | The bridge REST API is unreachable or answered 5xx | Retry later; report if it persists |
@@ -348,13 +349,31 @@ that long does not appear in a real archive.
 
 ## Bridge
 
+### `get_webhook`
+
+Read the runtime receiver through authenticated `GET /api/webhook`, using the bridge bearer token. Takes no arguments and never changes the destination. Returns the same bridge-masked view as detailed `bridge_status`, including `events`, `forward_self`, `forward_status`, `forward_channels`, `forward_broadcasts` and `authorization_set` (a boolean only). `configured: false` with a readable reason means runtime is enabled but no destination is configured. A disabled runtime returns `not_found` with an explicit explanation.
+
+The URL is masked by the bridge before it reaches MCP. No secret, Authorization value, fingerprint, full path, query or fragment is returned. This read requires the OAuth read scope, stays available under `WHATSAPP_READ_ONLY`, and is subject to `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` in both processes. `WHATSAPP_STATUS_DETAIL=false` also keeps this tool compact: only `configured`, `enabled`, `consecutive_failures` and `reason` are returned. Tool allow/deny lists still protect the read in both processes.
+
+### `test_webhook`
+
+Send one synthetic `webhook.test` event to the already configured receiver through authenticated `POST /api/webhook/test`. Takes no arguments; it cannot select a destination or send message content. Returns `{delivered, reason, event_id}` using the same bounded delivery as the private operator test. A receiver refusal or delivery failure returns `delivered: false` with a safe reason code, such as `http_403`, `receiver_refused` or `delivery_failed`. Synthetic tests do not change the health counters or last-success timestamp of subscribed events.
+
+Runtime disabled returns `not_found`; no enabled destination (including a receiver disabled after failures) returns `webhook_not_ready`: only the operator can configure or re-enable it, so repeating the test cannot fix that state. This tool has an external side effect: it requires the OAuth send scope, is hidden and refused under `WHATSAPP_READ_ONLY`, and both processes enforce the tool allow/deny lists. Changing or removing a destination remains exclusive to the private operator listener; neither MCP nor bridge REST exposes those operations.
+
 ### `bridge_status`
 
 Health of the bridge in one call. Never returns an error envelope, so call it first when other tools come back empty or with `bridge_unavailable`.
 
-**Default answer (minimal, issue #831):** `ok`, `paired`, `connected`; a short generic `reason` when `ok` is false (bridge unreachable, not paired, pairing in progress, account restricted, disconnected — never the bridge URL, exception text or operator API paths); `pairing_state` during a pairing step; `restriction: {kind, expires_at?}` when WhatsApp banned, locked or outdated the account; and `transcription_configured`, read from configuration without any probe. It asks the bridge's `/api/health` only: no whisper or endpoint probe, no notes.db read. Nothing else: no bridge URL, own phone number, build, transcription backend, cache sizes or send usage, which a hosted operator may not want in the end user's AI client.
+**Default answer (minimal, issue #831):** `ok`, `paired`, `connected`; a short generic `reason` when `ok` is false (bridge unreachable, not paired, pairing in progress, account restricted, disconnected — never the bridge URL, exception text or operator API paths); `pairing_state` during a pairing step; `restriction: {kind, expires_at?}` when WhatsApp banned, locked or outdated the account; `transcription_configured`, read from configuration without any probe; and the compact `webhook` block described below. It asks the bridge's authenticated `/api/health` only: no whisper or endpoint probe, no notes.db read. No bridge URL, own phone number, build, transcription backend, cache sizes or send usage, which a hosted operator may not want in the end user's AI client.
 
 **`detail=true`** returns the full payload described below, with the detailed `reason`. Ask for it before planning transcription work (`whisper.reachable`), to size the cache or read `send_usage`, or when you need the account's own `owner` identity. With `WHATSAPP_STATUS_DETAIL=false` the deployment refuses detail: the answer stays minimal and carries `detail: "unavailable on this deployment"`. `ok` means the same in both shapes.
+
+**Runtime webhook (issue #834).** Every answer includes `webhook: {configured, enabled, consecutive_failures, reason}`. Runtime off reports `configured: false` with `runtime webhook disabled`; runtime on without a receiver reports `runtime webhook has no destination`. A receiver disabled after consecutive failures stays `configured: true`, with `enabled: false` and its failure reason. Webhook state never changes `ok`, which still describes WhatsApp pairing and connection. This block covers the runtime receiver, independently of the legacy `WEBHOOK_URL` sender.
+
+The bridge health route always carries only the compact block. With detail permitted, `bridge_status` separately reads policy-protected `GET /api/webhook`; a denied or unavailable detail route leaves the compact block intact, without an error or a change to `ok`. With that read permitted, the block also includes `url`, `last_success` (UTC timestamp or null), `queued` and `dropped`. Detailed status also includes `events`, the four forwarding filters (`forward_self`, `forward_status`, `forward_channels`, `forward_broadcasts`) and `authorization_set` (a boolean), matching `get_webhook`. The bridge masks the URL before returning it: scheme, host, `/…` and the last four path characters (for example `https://example.com/…abcd`); the suffix is revealed only when the path without its initial slash has at least 12 characters; shorter paths are hidden completely. The receiver host remains visible whenever detail is permitted. Userinfo, full paths, query strings, fragments, secrets, Authorization values and secret fingerprints never reach the MCP process. The MCP server uses only its bridge bearer token, never the operator listener or token. An older bridge without the view, an invalid health response or an unreachable bridge yields an explicit unavailable reason with null `configured`, `enabled` and `consecutive_failures`, without an error envelope.
+
+Use [`get_webhook`](#get_webhook) for the receiver's events and filters, and [`test_webhook`](#test_webhook) for a synthetic delivery to its existing destination.
 
 The rest of this section describes the `detail=true` payload.
 
