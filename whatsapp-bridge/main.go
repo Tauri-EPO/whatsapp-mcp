@@ -40,7 +40,15 @@ func printQRCode(out io.Writer, code string, index int) {
 	_, _ = fmt.Fprintln(out, "\nWaiting for QR code scan... (a new code is printed each time WhatsApp rotates it)")
 }
 
-func webhookStartupMessage(switches bridgeSwitches) string {
+func webhookStartupMessage(switches bridgeSwitches, runtimeEnabled bool) string {
+	message := "Legacy webhook: " + legacyWebhookStartupMessage(switches)
+	if runtimeEnabled {
+		return message + "; runtime webhook enabled: no destination yet (set via PUT /operator/v1/webhook)"
+	}
+	return message + "; runtime webhook disabled"
+}
+
+func legacyWebhookStartupMessage(switches bridgeSwitches) string {
 	if !switches.WebhookEnabled {
 		return "WEBHOOK_ENABLED=false: outbound webhooks disabled"
 	}
@@ -126,8 +134,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	bridgeLog = logger
 	logger.Infof("Starting WhatsApp client...")
 	logger.Infof("%s", buildInfo().String())
-
-	logger.Infof("%s", webhookStartupMessage(cfg.Switches))
+	logger.Infof("%s", webhookStartupMessage(cfg.Switches, cfg.RuntimeWebhook.Enabled))
 
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll(storeDir(), storeDirMode); err != nil {

@@ -85,6 +85,7 @@ from whatsapp import (
     BLOCKING_CONNECTION_PROBLEMS,
     CHAT_FIELDS,
     CHAT_POLICY,
+    LIST_MESSAGES_FIELDS,
     MESSAGES_MAX_LIMIT,
     STATUS_BROADCAST_JID,
     UNANSWERED_FIELDS,
@@ -99,6 +100,7 @@ from whatsapp import (
     shape_rows,
     stored_sender_namespace,
     unknown_lid_digits,
+    validate_fields,
 )
 from whatsapp import (
     _read_bridge_token as whatsapp_read_bridge_token,
@@ -827,9 +829,17 @@ def list_messages(
     Reach for those whenever you are reading to analyse rather than to display.
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
+    is_context=true marks a row returned as a neighbour of a hit, not as a hit
+    of this page. Neighbours are not checked against the hit filters or counted
+    in limit; they may match and return as hits on another page. The marker
+    survives fields projections. Hits omit the key unless fields explicitly
+    selects is_context, which reports false (omit_nulls may drop that false).
+    include_context=False returns hits only in sort_by order. Context windows
+    use conversation reading order.
     Search hits requiring pre-edit text carry matched_original=true, retained
     with fields projections. Current text, filenames or transcripts alone do
-    not satisfy that hit's query; surrounding non-hits have no such flag.
+    not satisfy that hit's query; neighbours not selected as hits of this page
+    have no such flag.
     Edited messages carry edited_at (UTC) and original_content (the text before
     the first edit); null original_content means the original is unknown or the
     message is unedited, including messages first edited before this upgrade.
@@ -877,9 +887,11 @@ def list_messages(
                the same LOWER/instr substring rule: ASCII case folding, otherwise
                exact Unicode characters and no accent folding. An older index keeps FTS
                on current text/filenames and uses substring matching for saved originals
-        limit: Max messages to return (default 50, max 500)
+        limit: Max hits to return, excluding context rows (default 50, max 500)
         page: Page number for pagination (default 0); ignored when cursor is set
-        include_context: Include surrounding messages for context (default True)
+        include_context: Include neighbours of this page's hits, marked is_context=true
+               (default True). They are not checked against hit filters or counted
+               in limit, and may return as hits on another page; False returns hits only
         context_before: Messages to include before each match (default 1, max 50)
         context_after: Messages to include after each match (default 1, max 50)
                The whole result is capped at 2000 rows: with large limits the
@@ -986,7 +998,7 @@ def list_messages(
             transcript = (row.get("notes") or {}).get(TRANSCRIPT_KEY)
             if transcript:
                 row["transcript"] = transcript
-    result["items"] = shape_rows(result["items"], fields, omit_nulls, max_content_chars)
+    result["items"] = shape_rows(result["items"], fields, omit_nulls, max_content_chars, known=LIST_MESSAGES_FIELDS)
     return result
 
 
@@ -1208,8 +1220,9 @@ def list_unread(
         chat_jid: Restrict to one chat or a list of them — the daily digest over a
                       hand-picked set, instead of one call per chat
         exclude_chat_jid: One chat or a list of them to drop (known noise)
-        fields: Keep only these keys on each message row (same names as list_messages);
-                an unknown name is an error listing the valid ones
+        fields: Keep only these keys on each message row; is_context is only
+                available in list_messages. An unknown name is an error listing
+                the valid ones
         omit_nulls: Drop message keys that carry nothing (null, false, empty text)
         max_content_chars: Cut content/original_content, setting their respective
                 content_truncated/original_content_truncated flags
@@ -1235,6 +1248,7 @@ def list_unread(
     """
     if count_only:
         _reject_count_only_extras(fields)
+    validate_fields(fields)
     unread = whatsapp_list_unread(
         limit_chats=limit_chats,
         limit_per_chat=limit_per_chat,
@@ -1639,6 +1653,8 @@ def get_message_context(
     forwarding_score and the notes recorded for media messages). The same compact-read
     arguments shape them. There is no count_only here: this tool returns one
     window, whose size you already gave as before/after.
+    There is no is_context field: the anchor, before and after rows are already
+    separate, so fields=["is_context"] is refused.
 
     Args:
         chat_jid: JID of the chat containing the message (message IDs are only
@@ -1652,6 +1668,7 @@ def get_message_context(
         max_content_chars: Cut content/original_content, setting their respective
                 content_truncated/original_content_truncated flags
     """
+    validate_fields(fields)
     context = whatsapp_get_message_context(message_id, before, after, chat_jid or None)
     # One notes lookup and one sender lookup for the whole window.
     window = [context.message, *context.before, *context.after]

@@ -99,6 +99,19 @@ def test_notes_and_transcript_are_valid_field_names(db):
     assert "error" not in out
 
 
+@pytest.mark.parametrize("empty", [False, True])
+def test_is_context_is_refused_by_other_message_tools(db, empty):
+    if empty:
+        with sqlite3.connect(db) as conn:
+            conn.execute("DELETE FROM messages")
+    for out in (
+        main.list_unread(fields=["is_context"]),
+        main.get_message_context(chat_jid=A, message_id="m0000", fields=["is_context"]),
+    ):
+        assert out["error"]["code"] == "invalid_argument"
+        assert "is_context" in out["error"]["message"]
+
+
 def test_fields_must_be_a_non_empty_list(db):
     assert main.list_messages(chat_jid=A, fields=[])["error"]["code"] == "invalid_argument"
     assert main.list_messages(chat_jid=A, fields="content")["error"]["code"] == "invalid_argument"

@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import main
 import whatsapp
 
 CHAT_A = "111@s.whatsapp.net"
@@ -99,6 +100,88 @@ def test_context_uses_one_query_per_direction_regardless_of_hit_count(db):
 def test_dedupe_is_per_chat_not_per_id(db):
     result = ids(query="hit", context_before=0, context_after=0)
     assert ("a3", CHAT_A) in result and ("a3", CHAT_B) in result
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+@pytest.mark.parametrize("bound,hit,context", [("after", "new", "poll"), ("before", "poll", "new")])
+@pytest.mark.parametrize("new_media_type", [None, "audio"])
+@pytest.mark.parametrize("fields", [None, ["id", "media_type"]])
+def test_context_outside_time_bound_and_limit(
+    tmp_path, monkeypatch, sort_by, bound, hit, context, new_media_type, fields
+):
+    path = tmp_path / "messages.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Alice')", (CHAT_A,))
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type) "
+            "VALUES (?, ?, 's', ?, ?, 0, ?)",
+            [
+                ("poll", CHAT_A, "Old poll", "2026-10-07 10:00:00+00:00", "poll"),
+                ("new", CHAT_A, "New message", "2026-11-17 11:06:00+00:00", new_media_type),
+            ],
+        )
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+    kwargs = {bound: "2026-11-17T11:00:00Z", "chat_jid": CHAT_A, "limit": 1, "sort_by": sort_by, "fields": fields}
+    rows = main.list_messages(**kwargs)["items"]
+    assert [(row["id"], row.get("is_context")) for row in rows] == [
+        ("poll", True if context == "poll" else None),
+        ("new", True if context == "new" else None),
+    ]
+    if fields is None:
+        expected = main.list_messages(chat_jid=CHAT_A, sort_by="oldest", include_context=False)["items"]
+        for row in expected:
+            if row["id"] == context:
+                row["is_context"] = True
+        assert rows == expected
+    else:
+        assert rows == [
+            {"id": "poll", "media_type": "poll", **({"is_context": True} if context == "poll" else {})},
+            {"id": "new", "media_type": new_media_type, **({"is_context": True} if context == "new" else {})},
+        ]
+    assert [row["id"] for row in rows if not row.get("is_context")] == [hit]
+    assert [row["id"] for row in rows if row.get("is_context") is True] == [context]
+    hits_only = main.list_messages(**kwargs, include_context=False)["items"]
+    assert [row["id"] for row in hits_only] == [hit]
+    assert "is_context" not in hits_only[0]
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+def test_matching_neighbour_becomes_unmarked_hit_on_next_page(db, sort_by):
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM messages WHERE chat_jid != ? OR id NOT IN ('a1', 'a2')", (CHAT_A,))
+    kwargs = {"chat_jid": CHAT_A, "query": "A msg", "limit": 1, "sort_by": sort_by}
+    first = main.list_messages(**kwargs)
+    assert first["has_more"]
+    hit, neighbour = ("a1", "a2") if sort_by == "oldest" else ("a2", "a1")
+    expected = [{"id": hit}, {"id": neighbour, "is_context": True}]
+    if sort_by == "newest":
+        expected.reverse()
+    assert [{key: row[key] for key in ("id", "is_context") if key in row} for row in first["items"]] == expected
+    second = main.list_messages(**kwargs, cursor=first["next_cursor"])
+    assert not second["has_more"]
+    assert [row["id"] for row in second["items"] if not row.get("is_context")] == [neighbour]
+    assert "is_context" not in next(row for row in second["items"] if row["id"] == neighbour)
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+def test_marker_only_projection_distinguishes_hits_and_neighbours(db, sort_by):
+    kwargs = {"chat_jid": CHAT_A, "query": "hit", "limit": 1, "sort_by": sort_by, "fields": ["is_context"]}
+    assert main.list_messages(**kwargs)["items"] == [{"is_context": True}, {"is_context": False}, {"is_context": True}]
+    assert main.list_messages(**kwargs, include_context=False)["items"] == [{"is_context": False}]
+    assert main.list_messages(**kwargs, omit_nulls=True)["items"] == [{"is_context": True}, {}, {"is_context": True}]
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+def test_hit_inside_another_hits_window_stays_a_hit(db, sort_by):
+    rows = whatsapp.list_messages(query="hit", context_before=4, context_after=4, sort_by=sort_by)
+    hit_keys = {("a3", CHAT_A), ("a7", CHAT_A), ("a3", CHAT_B)}
+    assert {(row["id"], row["chat_jid"]) for row in rows if not row.get("is_context")} == hit_keys
+    for row in rows:
+        if (row["id"], row["chat_jid"]) in hit_keys:
+            assert "is_context" not in row
+        else:
+            assert row["is_context"] is True
 
 
 def test_overlapping_windows_dedupe(db):

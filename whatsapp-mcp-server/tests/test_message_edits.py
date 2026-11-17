@@ -62,7 +62,11 @@ def test_edit_metadata_in_context_windows(paired_dbs):
     context = main.get_message_context(chat_jid=ALICE, message_id="TARGET", before=1, after=1)
     rows = main.list_messages(chat_jid=ALICE, query="anchorword", context_before=1, context_after=1)["items"]
     assert [row["id"] for row in rows] == ["BEFORE", "TARGET", "AFTER"]
-    assert rows == [*context["before"], context["message"], *context["after"]]
+    assert rows == [
+        {**context["before"][0], "is_context": True},
+        context["message"],
+        {**context["after"][0], "is_context": True},
+    ]
     assert rows[0]["original_content"] == "oldword"
     assert rows[0]["edited_at"] == "2026-10-08T10:01:00.123000+00:00"
     assert all(row["edited_at"] is None and row["original_content"] is None for row in rows[1:])
