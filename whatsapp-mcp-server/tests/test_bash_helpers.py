@@ -217,7 +217,8 @@ def test_default_discovery_is_cached_but_injected_discovery_is_not(monkeypatch):
 
 
 @pytest.mark.parametrize("status", [0, 7])
-def test_bounded_run_preserves_output_and_exit_status(tmp_path, status):
+@pytest.mark.parametrize("text", [True, False])
+def test_bounded_run_preserves_output_and_exit_status(tmp_path, status, text):
     done = bash_helpers.run_bounded(
         [
             sys.executable,
@@ -225,71 +226,155 @@ def test_bounded_run_preserves_output_and_exit_status(tmp_path, status):
             f"import sys; print('output'); print('diagnostic', file=sys.stderr); sys.exit({status})",
         ],
         cwd=tmp_path,
-        timeout=10,
+        timeout=30,
+        text=text,
     )
     assert done.returncode == status
-    assert done.stdout == "output\n" and done.stderr == "diagnostic\n"
+    assert done.stdout == ("output\n" if text else b"output\r\n" if sys.platform == "win32" else b"output\n")
+    assert done.stderr == (
+        "diagnostic\n" if text else b"diagnostic\r\n" if sys.platform == "win32" else b"diagnostic\n"
+    )
 
 
-def _assert_child_stopped(pid):
-    if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes as wt
+def _wait_ready(path, seconds=30):
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < deadline, "descendant startup barrier was not reached"
+        time.sleep(0.01)
 
-        api = ctypes.WinDLL("kernel32", use_last_error=True)
-        api.OpenProcess.argtypes, api.OpenProcess.restype = [wt.DWORD, wt.BOOL, wt.DWORD], wt.HANDLE
-        api.WaitForSingleObject.argtypes, api.WaitForSingleObject.restype = [wt.HANDLE, wt.DWORD], wt.DWORD
-        api.TerminateProcess.argtypes, api.TerminateProcess.restype = [wt.HANDLE, wt.UINT], wt.BOOL
-        api.CloseHandle.argtypes = [wt.HANDLE]
-        handle = api.OpenProcess(0x100001, False, pid)  # SYNCHRONIZE | TERMINATE
-        if not handle:
-            assert ctypes.get_last_error() == 87  # PID no longer exists.
-            return
-        try:
-            stopped = api.WaitForSingleObject(handle, 5000) == 0
-            if not stopped:
-                api.TerminateProcess(handle, 1)  # Independent cleanup if containment regresses.
-            assert stopped, "timeout left a live descendant"
-        finally:
-            api.CloseHandle(handle)
-    else:
-        import signal
 
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
+def _assert_lock_released(path):
+    # Observe the child's resource, never signal a PID that might have been reused.
+    deadline = time.monotonic() + 5
+    with path.open("r+b") as lock:
+        while True:
             try:
-                os.kill(pid, 0)
-                state = Path(f"/proc/{pid}/stat")
-                if state.exists() and state.read_text().rpartition(")")[2].split()[0] == "Z":
-                    return  # Dead child awaiting reaping, with all pipes closed.
-            except ProcessLookupError:
-                return
-            time.sleep(0.01)
-        os.kill(pid, signal.SIGKILL)  # Independent cleanup before reporting failure.
-        pytest.fail("timeout left a live descendant")
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return  # Closing this file releases the assertion's own lock.
+            except OSError:
+                assert time.monotonic() < deadline, "descendant still owns its file lock"
+                time.sleep(0.01)
 
 
-@pytest.mark.parametrize("parent_exits", [False, True])
-def test_bound_kills_descendant_holding_pipes_even_after_parent_exit(tmp_path, parent_exits):
-    # Native Windows startup exhausted an 8s budget before creating child.pid.
-    # Leave startup margin while keeping the child's lifetime beyond cleanup.
-    bound = 30 if sys.platform == "win32" else 3
-    pid_file = tmp_path / "child.pid"
+@pytest.mark.parametrize("mode", ["timeout_with_parent", "timeout_after_parent_exit", "normal_after_parent_exit"])
+def test_bounded_run_releases_descendant_lock_after_readiness(tmp_path, monkeypatch, mode):
+    lock_file, child_ready, parent_ready = (tmp_path / name for name in ("owned.lock", "child.ready", "parent.ready"))
+    child_program = """
+import pathlib, sys, time
+with open(sys.argv[1], 'w+b') as lock:
+    lock.write(b'x'); lock.flush(); lock.seek(0)
+    if sys.platform == 'win32':
+        import msvcrt
+        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    print('child ready', flush=True)
+    pathlib.Path(sys.argv[2]).touch()
+    time.sleep(90)
+"""
     program = (
         "import pathlib, subprocess, sys, time\n"
-        "child = subprocess.Popen([sys.executable, '-c', \"import time; print('child ready', flush=True); time.sleep(90)\"])\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        f"child_program = {child_program!r}\n"
+        f"options = {'dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' if mode == 'normal_after_parent_exit' else '{}'}\n"
+        "subprocess.Popen([sys.executable, '-c', child_program, sys.argv[1], sys.argv[2]], **options)\n"
+        "deadline = time.monotonic() + 30\n"
+        "while not pathlib.Path(sys.argv[2]).exists():\n"
+        "    if time.monotonic() >= deadline: raise RuntimeError('child did not become ready')\n"
+        "    time.sleep(.01)\n"
         "print('parent ready', flush=True)\n"
-        f"{'sys.exit(0)' if parent_exits else 'time.sleep(90)'}\n"
+        "pathlib.Path(sys.argv[3]).touch()\n" + ("time.sleep(90)\n" if mode == "timeout_with_parent" else "")
     )
-    started = time.monotonic()
+    # Keep interpreter startup outside the short bound under test. The real
+    # communicate still runs, after the real child has acquired its lock.
+    communicate = subprocess.Popen.communicate
+    bound_started = []
+
+    def after_ready(process, *args, **kwargs):
+        if not bound_started:
+            _wait_ready(parent_ready)
+            bound_started.append(time.monotonic())
+        return communicate(process, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", after_ready)
+    command = [sys.executable, "-c", program, str(lock_file), str(child_ready), str(parent_ready)]
     try:
-        with pytest.raises(
-            bash_helpers.ScriptTimeout, match=f"{bound}s execution bound; terminated the process tree"
-        ) as error:
-            bash_helpers.run_bounded([sys.executable, "-c", program, str(pid_file)], timeout=bound)
-        assert time.monotonic() - started < bound + 10  # Bounded cleanup, not the child's 90s lifetime.
-        assert "parent ready" in error.value.stdout and "child ready" in error.value.stdout
+        if mode.startswith("timeout"):
+            with pytest.raises(bash_helpers.ScriptTimeout, match="3s execution bound") as error:
+                bash_helpers.run_bounded(command, timeout=3)
+            assert "parent ready" in error.value.stdout and "child ready" in error.value.stdout
+        else:
+            done = bash_helpers.run_bounded(command, timeout=3)
+            assert done.returncode == 0 and "parent ready" in done.stdout
+        assert time.monotonic() - bound_started[0] < 13
     finally:
-        assert pid_file.exists(), "test never reached its descendant startup barrier"
-        _assert_child_stopped(int(pid_file.read_text()))
+        if child_ready.exists():
+            _assert_lock_released(lock_file)
+
+
+@pytest.mark.parametrize("primary", ["timeout", "other_error"])
+def test_cleanup_failures_preserve_primary_error_and_close_pipes(monkeypatch, primary):
+    class Pipe:
+        closed = False
+
+        def close(self):
+            self.closed = True
+            raise OSError("close failed")
+
+    class Process:
+        pid = 999999
+        _handle = 999999
+        stdout, stderr = Pipe(), Pipe()
+        calls = 0
+
+        def communicate(self, **kwargs):
+            self.calls += 1
+            if primary == "other_error":
+                raise ValueError("primary failure")
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired("probe", 3, output=b"prefix", stderr=b"diagnostic")
+            raise subprocess.TimeoutExpired("probe", 10, output=b"prefix complete")
+
+        def kill(self):
+            raise OSError("kill failed")
+
+        def wait(self, **kwargs):
+            raise subprocess.TimeoutExpired("probe", 10)
+
+    process = Process()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+    if sys.platform == "win32":
+        from tests import _windows_job
+
+        class Job:
+            def assign(self, handle):
+                pass
+
+            def close(self):
+                raise OSError("job close failed")
+
+        monkeypatch.setattr(_windows_job, "WindowsJob", Job)
+    else:
+
+        def failed_group_kill(*args):
+            raise OSError("group kill failed")
+
+        monkeypatch.setattr(os, "killpg", failed_group_kill)
+    if primary == "timeout":
+        with pytest.raises(bash_helpers.ScriptTimeout, match="3s execution bound") as error:
+            bash_helpers.run_bounded(["probe"], timeout=3)
+        assert error.value.timeout == 3
+        assert error.value.output == b"prefix complete" and error.value.stderr == b"diagnostic"
+        assert process.calls == 2
+    else:
+        with pytest.raises(ValueError, match="primary failure"):
+            bash_helpers.run_bounded(["probe"], timeout=3)
+    assert process.stdout.closed and process.stderr.closed
