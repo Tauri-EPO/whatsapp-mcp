@@ -4,6 +4,8 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -212,3 +214,167 @@ def test_default_discovery_is_cached_but_injected_discovery_is_not(monkeypatch):
         assert len(calls) == 3
     finally:
         bash_helpers._default_bash.cache_clear()
+
+
+@pytest.mark.parametrize("status", [0, 7])
+@pytest.mark.parametrize("text", [True, False])
+def test_bounded_run_preserves_output_and_exit_status(tmp_path, status, text):
+    done = bash_helpers.run_bounded(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; print('output'); print('diagnostic', file=sys.stderr); sys.exit({status})",
+        ],
+        cwd=tmp_path,
+        timeout=30,
+        text=text,
+    )
+    assert done.returncode == status
+    assert done.stdout == ("output\n" if text else b"output\r\n" if sys.platform == "win32" else b"output\n")
+    assert done.stderr == (
+        "diagnostic\n" if text else b"diagnostic\r\n" if sys.platform == "win32" else b"diagnostic\n"
+    )
+
+
+def _wait_ready(path, seconds=30):
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < deadline, "descendant startup barrier was not reached"
+        time.sleep(0.01)
+
+
+def _assert_lock_released(path):
+    # Observe the child's resource, never signal a PID that might have been reused.
+    deadline = time.monotonic() + 5
+    with path.open("r+b") as lock:
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return  # Closing this file releases the assertion's own lock.
+            except OSError:
+                assert time.monotonic() < deadline, "descendant still owns its file lock"
+                time.sleep(0.01)
+
+
+@pytest.mark.parametrize("mode", ["timeout_with_parent", "timeout_after_parent_exit", "normal_after_parent_exit"])
+def test_bounded_run_releases_descendant_lock_after_readiness(tmp_path, monkeypatch, mode):
+    lock_file, child_ready, parent_ready = (tmp_path / name for name in ("owned.lock", "child.ready", "parent.ready"))
+    child_program = """
+import pathlib, sys, time
+with open(sys.argv[1], 'w+b') as lock:
+    lock.write(b'x'); lock.flush(); lock.seek(0)
+    if sys.platform == 'win32':
+        import msvcrt
+        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    print('child ready', flush=True)
+    pathlib.Path(sys.argv[2]).touch()
+    time.sleep(90)
+"""
+    program = (
+        "import pathlib, subprocess, sys, time\n"
+        f"child_program = {child_program!r}\n"
+        f"options = {'dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' if mode == 'normal_after_parent_exit' else '{}'}\n"
+        "subprocess.Popen([sys.executable, '-c', child_program, sys.argv[1], sys.argv[2]], **options)\n"
+        "deadline = time.monotonic() + 30\n"
+        "while not pathlib.Path(sys.argv[2]).exists():\n"
+        "    if time.monotonic() >= deadline: raise RuntimeError('child did not become ready')\n"
+        "    time.sleep(.01)\n"
+        "print('parent ready', flush=True)\n"
+        "pathlib.Path(sys.argv[3]).touch()\n" + ("time.sleep(90)\n" if mode == "timeout_with_parent" else "")
+    )
+    # Keep interpreter startup outside the short bound under test. The real
+    # communicate still runs, after the real child has acquired its lock.
+    communicate = subprocess.Popen.communicate
+    bound_started = []
+
+    def after_ready(process, *args, **kwargs):
+        if not bound_started:
+            _wait_ready(parent_ready)
+            bound_started.append(time.monotonic())
+        return communicate(process, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", after_ready)
+    command = [sys.executable, "-c", program, str(lock_file), str(child_ready), str(parent_ready)]
+    try:
+        if mode.startswith("timeout"):
+            with pytest.raises(bash_helpers.ScriptTimeout, match="3s execution bound") as error:
+                bash_helpers.run_bounded(command, timeout=3)
+            assert "parent ready" in error.value.stdout and "child ready" in error.value.stdout
+        else:
+            done = bash_helpers.run_bounded(command, timeout=3)
+            assert done.returncode == 0 and "parent ready" in done.stdout
+        assert time.monotonic() - bound_started[0] < 13
+    finally:
+        if child_ready.exists():
+            _assert_lock_released(lock_file)
+
+
+@pytest.mark.parametrize("primary", ["timeout", "other_error"])
+def test_cleanup_failures_preserve_primary_error_and_close_pipes(monkeypatch, primary):
+    class Pipe:
+        closed = False
+
+        def close(self):
+            self.closed = True
+            raise OSError("close failed")
+
+    class Process:
+        pid = 999999
+        _handle = 999999
+        stdout, stderr = Pipe(), Pipe()
+        calls = 0
+
+        def communicate(self, **kwargs):
+            self.calls += 1
+            if primary == "other_error":
+                raise ValueError("primary failure")
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired("probe", 3, output=b"prefix", stderr=b"diagnostic")
+            raise subprocess.TimeoutExpired("probe", 10, output=b"prefix complete")
+
+        def kill(self):
+            raise OSError("kill failed")
+
+        def wait(self, **kwargs):
+            raise subprocess.TimeoutExpired("probe", 10)
+
+    process = Process()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+    if sys.platform == "win32":
+        from tests import _windows_job
+
+        class Job:
+            def assign(self, handle):
+                pass
+
+            def close(self):
+                raise OSError("job close failed")
+
+        monkeypatch.setattr(_windows_job, "WindowsJob", Job)
+    else:
+
+        def failed_group_kill(*args):
+            raise OSError("group kill failed")
+
+        monkeypatch.setattr(os, "killpg", failed_group_kill)
+    if primary == "timeout":
+        with pytest.raises(bash_helpers.ScriptTimeout, match="3s execution bound") as error:
+            bash_helpers.run_bounded(["probe"], timeout=3)
+        assert error.value.timeout == 3
+        assert error.value.output == b"prefix complete" and error.value.stderr == b"diagnostic"
+        assert process.calls == 2
+    else:
+        with pytest.raises(ValueError, match="primary failure"):
+            bash_helpers.run_bounded(["probe"], timeout=3)
+    assert process.stdout.closed and process.stderr.closed
