@@ -725,6 +725,7 @@ func (b *Bridge) handleRuntimeWebhook(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, err.Error())
 			return
 		}
+		bridgeLog.Infof("Runtime webhook configured")
 		writeJSON(w, 200, b.RuntimeWebhook.snapshot())
 	case http.MethodDelete:
 		b.RuntimeWebhook.remove()

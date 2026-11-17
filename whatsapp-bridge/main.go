@@ -40,7 +40,18 @@ func printQRCode(out io.Writer, code string, index int) {
 	_, _ = fmt.Fprintln(out, "\nWaiting for QR code scan... (a new code is printed each time WhatsApp rotates it)")
 }
 
-func webhookStartupMessage(switches bridgeSwitches) string {
+func webhookStartupMessage(switches bridgeSwitches, runtime *runtimeWebhook) string {
+	message := legacyWebhookStartupMessage(switches)
+	if runtime != nil && runtime.options.Enabled {
+		if runtime.configured() {
+			return message + "; runtime webhook: configured"
+		}
+		return message + "; runtime webhook: not configured (process-local destination not set)"
+	}
+	return message
+}
+
+func legacyWebhookStartupMessage(switches bridgeSwitches) string {
 	if !switches.WebhookEnabled {
 		return "WEBHOOK_ENABLED=false: outbound webhooks disabled"
 	}
@@ -126,8 +137,6 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	bridgeLog = logger
 	logger.Infof("Starting WhatsApp client...")
 	logger.Infof("%s", buildInfo().String())
-
-	logger.Infof("%s", webhookStartupMessage(cfg.Switches))
 
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll(storeDir(), storeDirMode); err != nil {
@@ -327,6 +336,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	if cfg.RuntimeWebhook.Enabled {
 		bridge.RuntimeWebhook = newRuntimeWebhook(bridge.ctx, cfg.RuntimeWebhook)
 	}
+	logger.Infof("%s", webhookStartupMessage(cfg.Switches, bridge.RuntimeWebhook))
 	// Install exit before exposing operator mutations on a paired device.
 	bridge.Exit = func(reason string, code int) {
 		logger.Errorf("%s", reason)

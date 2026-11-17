@@ -827,6 +827,10 @@ def list_messages(
     Reach for those whenever you are reading to analyse rather than to display.
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
+    Surrounding context rows are outside the filters and limit and carry
+    is_context=true, retained with fields projections; hits omit that key.
+    include_context=False returns hits only in sort_by order. Context windows
+    use conversation reading order.
     Search hits requiring pre-edit text carry matched_original=true, retained
     with fields projections. Current text, filenames or transcripts alone do
     not satisfy that hit's query; surrounding non-hits have no such flag.
@@ -877,9 +881,10 @@ def list_messages(
                the same LOWER/instr substring rule: ASCII case folding, otherwise
                exact Unicode characters and no accent folding. An older index keeps FTS
                on current text/filenames and uses substring matching for saved originals
-        limit: Max messages to return (default 50, max 500)
+        limit: Max hits to return, excluding context rows (default 50, max 500)
         page: Page number for pagination (default 0); ignored when cursor is set
-        include_context: Include surrounding messages for context (default True)
+        include_context: Include surrounding messages outside the filters and limit,
+               marked is_context=true (default True); False returns hits only
         context_before: Messages to include before each match (default 1, max 50)
         context_after: Messages to include after each match (default 1, max 50)
                The whole result is capped at 2000 rows: with large limits the

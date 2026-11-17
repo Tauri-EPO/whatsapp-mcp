@@ -2005,12 +2005,12 @@ func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T)
 
 func TestWebhookStartupMessage(t *testing.T) {
 	t.Setenv("WEBHOOK_ENABLED", "false")
-	if got, want := webhookStartupMessage(testSwitches()), "WEBHOOK_ENABLED=false: outbound webhooks disabled"; got != want {
+	if got, want := webhookStartupMessage(testSwitches(), nil), "WEBHOOK_ENABLED=false: outbound webhooks disabled"; got != want {
 		t.Errorf("disabled startup message = %q, want %q", got, want)
 	}
 
 	t.Setenv("WEBHOOK_ENABLED", "true")
-	if got, want := webhookStartupMessage(testSwitches()), "FORWARD_SELF enabled: forwarding self messages to webhook; status updates are not forwarded (WEBHOOK_FORWARD_STATUS); channels forwarded=false (WEBHOOK_FORWARD_CHANNELS); broadcast lists forwarded=false (WEBHOOK_FORWARD_BROADCASTS)"; got != want {
+	if got, want := webhookStartupMessage(testSwitches(), nil), "FORWARD_SELF enabled: forwarding self messages to webhook; status updates are not forwarded (WEBHOOK_FORWARD_STATUS); channels forwarded=false (WEBHOOK_FORWARD_CHANNELS); broadcast lists forwarded=false (WEBHOOK_FORWARD_BROADCASTS)"; got != want {
 		t.Errorf("enabled startup message = %q, want %q", got, want)
 	}
 }

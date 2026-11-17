@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import main
 import whatsapp
 
 CHAT_A = "111@s.whatsapp.net"
@@ -99,6 +100,47 @@ def test_context_uses_one_query_per_direction_regardless_of_hit_count(db):
 def test_dedupe_is_per_chat_not_per_id(db):
     result = ids(query="hit", context_before=0, context_after=0)
     assert ("a3", CHAT_A) in result and ("a3", CHAT_B) in result
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+@pytest.mark.parametrize("bound,hit,context", [("after", "new", "poll"), ("before", "poll", "new")])
+@pytest.mark.parametrize("new_media_type", [None, "audio"])
+@pytest.mark.parametrize("fields", [None, ["id", "media_type"]])
+def test_context_outside_time_bound_and_limit(
+    tmp_path, monkeypatch, sort_by, bound, hit, context, new_media_type, fields
+):
+    path = tmp_path / "messages.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO chats (jid, name) VALUES (?, 'Alice')", (CHAT_A,))
+        conn.executemany(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type) "
+            "VALUES (?, ?, 's', ?, ?, 0, ?)",
+            [
+                ("poll", CHAT_A, "Old poll", "2026-10-07 10:00:00+00:00", "poll"),
+                ("new", CHAT_A, "New message", "2026-11-17 11:06:00+00:00", new_media_type),
+            ],
+        )
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(path))
+    kwargs = {bound: "2026-11-17T11:00:00Z", "chat_jid": CHAT_A, "limit": 1, "sort_by": sort_by, "fields": fields}
+    rows = main.list_messages(**kwargs)["items"]
+    assert [row["id"] for row in rows if not row.get("is_context")] == [hit]
+    assert [row["id"] for row in rows if row.get("is_context") is True] == [context]
+    hits_only = main.list_messages(**kwargs, include_context=False)["items"]
+    assert [row["id"] for row in hits_only] == [hit]
+    assert "is_context" not in hits_only[0]
+
+
+@pytest.mark.parametrize("sort_by", ["oldest", "newest"])
+def test_hit_inside_another_hits_window_stays_a_hit(db, sort_by):
+    rows = whatsapp.list_messages(query="hit", context_before=4, context_after=4, sort_by=sort_by)
+    hit_keys = {("a3", CHAT_A), ("a7", CHAT_A), ("a3", CHAT_B)}
+    assert {(row["id"], row["chat_jid"]) for row in rows if not row.get("is_context")} == hit_keys
+    for row in rows:
+        if (row["id"], row["chat_jid"]) in hit_keys:
+            assert "is_context" not in row
+        else:
+            assert row["is_context"] is True
 
 
 def test_overlapping_windows_dedupe(db):

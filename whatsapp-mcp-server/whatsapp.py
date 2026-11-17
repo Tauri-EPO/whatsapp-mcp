@@ -1306,6 +1306,7 @@ MESSAGE_FIELDS: tuple[str, ...] = (
     "content_truncated",
     "original_content_truncated",
     "matched_original",
+    "is_context",
 )
 # "notes" is on every chat row, whichever listing produced it.
 _CHAT_ROW_FIELDS: tuple[str, ...] = (
@@ -1376,6 +1377,8 @@ def shape_rows(
     did not ask for it, because losing that flag would make the truncated text
     look complete. Message rows also truncate `original_content`, with its own
     `original_content_truncated` flag retained under the same projection rule.
+    `matched_original` and `is_context` also survive projections so search hits
+    and surrounding non-hits remain distinguishable.
     """
     selected = validate_fields(fields, known)
     limit = int(max_content_chars) if max_content_chars is not None else None
@@ -1399,6 +1402,8 @@ def shape_rows(
             keep = [*selected, *(flag for _, flag in text_fields if out.get(flag))]
             if out.get("matched_original"):
                 keep.append("matched_original")
+            if out.get("is_context"):
+                keep.append("is_context")
             out = {name: out[name] for name in keep if name in out}
         if omit_nulls:
             out = {name: value for name, value in out.items() if not _is_empty(value)}
@@ -3048,7 +3053,8 @@ def list_messages_page(
             what was said in it and is ranked with the written hits.
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
-        include_context: Whether to include messages before and after matches (default True)
+        include_context: Include surrounding rows outside the filters and limit,
+            marked is_context=True (default True); False returns hits only
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
         sort_by: Sort order - "newest" (default), "oldest" for chronological ordering, or
@@ -3177,12 +3183,16 @@ def list_messages_page(
                 next_cursor = encode_cursor({"k": "messages", "s": sort_by, "o": offset + limit})
 
         result = [_row_to_message(msg) for msg in messages]
+        hit_keys = {(msg.id, msg.chat_jid) for msg in result}
         original_keys = _original_match_keys(conn, predicate, matched_query, result)
 
         def render(page: list[Message]) -> list[dict[str, Any]]:
             rows = msgs_to_dicts(page)
             for row in rows:
-                if (row["id"], row["chat_jid"]) in original_keys:
+                key = (row["id"], row["chat_jid"])
+                if key not in hit_keys:
+                    row["is_context"] = True
+                if key in original_keys:
                     row["matched_original"] = True
             return rows
 

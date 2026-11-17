@@ -31,6 +31,44 @@ import (
 
 const fakeWebhookSecret = "0123456789abcdef-Fake-Webhook-Secret"
 
+func TestWebhookStartupMessageRuntime(t *testing.T) {
+	for _, legacyEnabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(legacyEnabled), func(t *testing.T) {
+			b, server, destination, _, _ := runtimeWebhookFixture(t, nil)
+			switches := testSwitches()
+			switches.WebhookEnabled = legacyEnabled
+			legacy := webhookStartupMessage(switches, nil)
+			if got, want := webhookStartupMessage(switches, b.RuntimeWebhook), legacy+"; runtime webhook: not configured (process-local destination not set)"; got != want {
+				t.Fatalf("unconfigured startup message = %q, want %q", got, want)
+			}
+			configureWebhookHTTP(t, server, destination)
+			if got, want := webhookStartupMessage(switches, b.RuntimeWebhook), legacy+"; runtime webhook: configured"; got != want {
+				t.Fatalf("configured startup message = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRuntimeWebhookConfigurationLog(t *testing.T) {
+	b, server, destination, _, logger := runtimeWebhookFixture(t, nil)
+	const authorization = "Bearer fake-receiver-authorization"
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": authorization}); code != 200 {
+		t.Fatalf("configure=%d %s", code, data)
+	}
+	if code, _ := configureWebhookFields(t, server, "http://example.com", nil); code != 400 {
+		t.Fatalf("invalid configuration status=%d, want 400", code)
+	}
+	logs := logger.String()
+	if strings.Count(logs, "[INFO] Runtime webhook configured\n") != 1 {
+		t.Fatalf("missing single INFO configuration log: %s", logs)
+	}
+	for _, private := range []string{destination, fakeWebhookSecret, authorization, fakeOperatorToken, b.RuntimeWebhook.snapshot().Fingerprint} {
+		if strings.Contains(logs, private) {
+			t.Fatal("configuration log contains private receiver data")
+		}
+	}
+}
+
 func configureWebhookFields(t *testing.T, server *httptest.Server, destination string, fields map[string]any) (int, []byte) {
 	t.Helper()
 	body := map[string]any{"url": destination, "events": []string{"message.received"}, "secret": fakeWebhookSecret, "header_prefix": "X-Example"}
