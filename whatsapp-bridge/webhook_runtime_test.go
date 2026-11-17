@@ -31,6 +31,46 @@ import (
 
 const fakeWebhookSecret = "0123456789abcdef-Fake-Webhook-Secret"
 
+func TestRuntimeWebhookConfigurationLog(t *testing.T) {
+	b, server, destination, _, logger := runtimeWebhookFixture(t, nil)
+	globalLogger := installRecordingLogger(t)
+	receiverURL, err := url.Parse(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiverURL.Path = "/private-receiver-path"
+	destination = receiverURL.String()
+	const authorization = "Bearer fake-receiver-authorization"
+	if code, data := configureWebhookFields(t, server, destination, map[string]any{"authorization": authorization}); code != 200 {
+		t.Fatalf("configure=%d %s", code, data)
+	}
+	if code, _ := configureWebhookFields(t, server, "http://example.com", nil); code != 400 {
+		t.Fatalf("invalid configuration status=%d, want 400", code)
+	}
+	fingerprint := b.RuntimeWebhook.snapshot().Fingerprint
+	if code, _ := webhookOperatorRequest(t, server, "DELETE", "/operator/v1/webhook", ""); code != 204 {
+		t.Fatalf("delete status=%d, want 204", code)
+	}
+	if b.RuntimeWebhook.configured() {
+		t.Fatal("successful DELETE retained the receiver")
+	}
+	logs := logger.String()
+	for _, message := range []string{"Runtime webhook configured", "Runtime webhook disabled"} {
+		line := "[INFO] " + message + "\n"
+		if strings.Count(logs, line) != 1 {
+			t.Fatalf("missing single instance INFO lifecycle log: %s", logs)
+		}
+		if strings.Contains(globalLogger.String(), message) {
+			t.Fatal("lifecycle log used the package logger instead of the instance logger")
+		}
+	}
+	for _, private := range []string{receiverURL.Hostname(), receiverURL.Path, fakeWebhookSecret, authorization, fakeOperatorToken, fingerprint} {
+		if strings.Contains(logs, private) || strings.Contains(globalLogger.String(), private) {
+			t.Fatal("PUT/DELETE logs contain private receiver data")
+		}
+	}
+}
+
 func configureWebhookFields(t *testing.T, server *httptest.Server, destination string, fields map[string]any) (int, []byte) {
 	t.Helper()
 	body := map[string]any{"url": destination, "events": []string{"message.received"}, "secret": fakeWebhookSecret, "header_prefix": "X-Example"}
