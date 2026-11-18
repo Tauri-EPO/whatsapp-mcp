@@ -247,6 +247,8 @@ func TestHistoryShareNoticeAndNestedBundleDoNotDownload(t *testing.T) {
 }
 
 func TestHistoryShareHTTPDownloadCancelledAndTemporaryFileRemoved(t *testing.T) {
+	// Keep the media store separate from the spool directory inspected below.
+	t.Setenv(storeDirEnv, t.TempDir())
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 	ms := newTestMessageStore(t)

@@ -20,7 +20,7 @@ func TestMain(m *testing.M) {
 	for _, name := range []string{webhookEnabledEnv, forwardSelfEnv, mediaAutoDownloadEnv, metricsEnv, webhookForwardStatusEnv, webhookForwardChannelsEnv, webhookForwardBroadcastsEnv} {
 		_ = os.Unsetenv(name)
 	}
-	os.Exit(m.Run())
+	os.Exit(runWithStoreGuard(m.Run))
 }
 
 func unsetWebhookEnabled(t *testing.T) {

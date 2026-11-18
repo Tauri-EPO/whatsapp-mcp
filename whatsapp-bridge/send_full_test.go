@@ -325,6 +325,9 @@ func TestFullRESTForwardResolvesBeforeMediaAndPersists(t *testing.T) {
 			if rec.Code != wantStatus || sends != wantSends || downloads != wantMedia || uploads != wantMedia || len(ask.calls) != 1 {
 				t.Fatalf("status=%d body=%s sends=%d download=%d upload=%d queries=%v", rec.Code, rec.Body.String(), sends, downloads, uploads, ask.calls)
 			}
+			if tc.media && !tc.denied {
+				assertTestCachedMedia(t, registeredJID.String(), "FORWARDED1", mediaPath)
+			}
 			var chat string
 			err := b.Store.db.QueryRow("SELECT chat_jid FROM messages WHERE id='FORWARDED1'").Scan(&chat)
 			if tc.denied {
