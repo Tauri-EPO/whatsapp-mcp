@@ -20,10 +20,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash
+from tests.bash_helpers import BASH_SKIP_REASON, bash_command, resolve_bash, run_bounded
 
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "smoke.sh"
+# 2026-11-17: native Git Bash reached 97.93s on this Windows host.
+# 240s leaves scheduling margin; POSIX keeps each script's original bound.
+WINDOWS_SCRIPT_TIMEOUT = 240
 
 BASH = resolve_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON)
@@ -232,13 +235,11 @@ class Stack:
 
     def run(self, *args: str, cwd: Path | None = None, **fakes: str) -> subprocess.CompletedProcess[str]:
         assert BASH is not None
-        return subprocess.run(
+        return run_bounded(
             bash_command(BASH, self.script, *args, bin_dir=self.dir / "bin"),
             cwd=cwd or self.dir,
             env={**self.env, **fakes},
-            capture_output=True,
-            text=True,
-            timeout=60,  # a flag parsed wrong used to spin forever
+            timeout=WINDOWS_SCRIPT_TIMEOUT if os.name == "nt" else 60,
         )
 
     def docker_calls(self) -> str:
@@ -366,7 +367,7 @@ def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
     )
     wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
     assert BASH is not None
-    result = subprocess.run(
+    result = run_bounded(
         bash_command(BASH, ROOT / "whatsapp-bridge" / "docker-healthcheck.sh", bin_dir=tmp_path),
         env={
             **os.environ,
@@ -374,8 +375,8 @@ def test_healthcheck_refuses_inherited_proxy(tmp_path: Path) -> None:
             "WHATSAPP_BRIDGE_TOKEN": "bridge-token-0123456789",
             "http_proxy": "http://proxy.example.invalid:3128",
         },
-        capture_output=True,
-        timeout=10,
+        timeout=WINDOWS_SCRIPT_TIMEOUT if os.name == "nt" else 10,
+        text=False,
     )
     assert result.returncode == 0, result.stderr
 
@@ -395,7 +396,7 @@ def test_healthcheck_normalizes_accepted_bind(tmp_path: Path, bind: str, target:
     wget.write_text('#!/bin/sh\nfor arg in "$@"; do :; done\nprintf "%s" "$arg"\n', encoding="utf-8", newline="\n")
     wget.chmod(wget.stat().st_mode | stat.S_IEXEC)
     assert BASH is not None
-    result = subprocess.run(
+    result = run_bounded(
         bash_command(BASH, ROOT / "whatsapp-bridge" / "docker-healthcheck.sh", bin_dir=tmp_path),
         env={
             **os.environ,
@@ -404,9 +405,8 @@ def test_healthcheck_normalizes_accepted_bind(tmp_path: Path, bind: str, target:
             "WHATSAPP_BRIDGE_PORT": "8080",
             "WHATSAPP_BRIDGE_TOKEN": "bridge-token-0123456789",
         },
-        capture_output=True,
         text=True,
-        timeout=10,
+        timeout=WINDOWS_SCRIPT_TIMEOUT if os.name == "nt" else 10,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"http://{target}:8080/api/health"
@@ -736,7 +736,11 @@ def test_http_provider_embedded_probe_obeys_reachability(tmp_path: Path, reachab
     (tmp_path / "transcribe.py").write_text(
         f"def load_config(): return None\ndef probe_http_provider(config, key): return ({reachable!r}, 'fake-probe')\n"
     )
-    result = subprocess.run([sys.executable, "-c", program], cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    result = run_bounded(
+        [sys.executable, "-c", program],
+        cwd=tmp_path,
+        timeout=WINDOWS_SCRIPT_TIMEOUT if os.name == "nt" else 10,
+    )
     assert result.returncode == expected, result.stdout + result.stderr
 
 

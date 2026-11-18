@@ -2,8 +2,10 @@
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
+from contextlib import suppress
 from functools import cache
 from pathlib import Path
 
@@ -75,3 +77,73 @@ def bash_command(
         str(script),
         *args,
     ]
+
+
+class ScriptTimeout(subprocess.TimeoutExpired):
+    def __str__(self):
+        return f"script exceeded its {self.timeout:g}s execution bound"
+
+
+def _stop_tree(process, job):
+    with suppress(OSError, ValueError):
+        if job:
+            job.close()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+
+
+def run_bounded(command, *, cwd=None, env=None, timeout, text=True):
+    """Capture a script; preserve its execution-bound error through cleanup."""
+    job = None
+    if sys.platform == "win32":
+        from tests._windows_job import WindowsJob
+
+        job = WindowsJob()
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+            creationflags=subprocess.CREATE_NO_WINDOW if job else 0,
+            start_new_session=job is None,
+        )
+        if job:
+            job.assign(process._handle)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = error.output, error.stderr
+            _stop_tree(process, job)
+            try:
+                remaining_stdout, remaining_stderr = process.communicate(timeout=10)
+                stdout = remaining_stdout or stdout
+                stderr = remaining_stderr or stderr
+            except subprocess.TimeoutExpired as cleanup_error:
+                if cleanup_error.output:
+                    stdout = cleanup_error.output
+                if cleanup_error.stderr:
+                    stderr = cleanup_error.stderr
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+            raise ScriptTimeout(command, timeout, output=stdout, stderr=stderr) from None
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        if process is not None:
+            # Also kill a group/job on a normal return after its leader exited.
+            _stop_tree(process, job)
+            with suppress(OSError, ValueError, subprocess.SubprocessError):
+                process.kill()
+            with suppress(OSError, ValueError, subprocess.SubprocessError):
+                process.wait(timeout=10)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    with suppress(OSError, ValueError):
+                        pipe.close()
+        elif job:
+            with suppress(OSError, ValueError):
+                job.close()
