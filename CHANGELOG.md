@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.12.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.11.0...v2.12.0) (2026-11-18)
+
+
+### Features
+
+* runtime webhook in bridge_status, get_webhook and test_webhook ([#842](https://github.com/Tauri-EPO/whatsapp-mcp/issues/842)) ([2da0ea0](https://github.com/Tauri-EPO/whatsapp-mcp/commit/2da0ea07249db314cb27c0851213de22d6d03979)), closes [#833](https://github.com/Tauri-EPO/whatsapp-mcp/issues/833) [#834](https://github.com/Tauri-EPO/whatsapp-mcp/issues/834)
+
+
+### Bug fixes
+
+* mark list_messages context rows; report the runtime webhook at startup ([#841](https://github.com/Tauri-EPO/whatsapp-mcp/issues/841)) ([9727104](https://github.com/Tauri-EPO/whatsapp-mcp/commit/972710437d2e1bbd891764055551c600b0f23cce)), closes [#838](https://github.com/Tauri-EPO/whatsapp-mcp/issues/838) [#835](https://github.com/Tauri-EPO/whatsapp-mcp/issues/835)
+
+
+### Dependencies
+
+* bump the gomod-version-updates group in /whatsapp-bridge with 3 updates ([#836](https://github.com/Tauri-EPO/whatsapp-mcp/issues/836)) ([3bb1090](https://github.com/Tauri-EPO/whatsapp-mcp/commit/3bb10906f1e692615ae8976d99ae51e3ac3569a6))
+* bump the pip-version-updates group in /whatsapp-mcp-server with 2 updates ([#837](https://github.com/Tauri-EPO/whatsapp-mcp/issues/837)) ([0306f94](https://github.com/Tauri-EPO/whatsapp-mcp/commit/0306f9434264c5ee19e9f01c2b2759356794f89a))
+
 ## [2.11.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.10.0...v2.11.0) (2026-11-12)
 
 
