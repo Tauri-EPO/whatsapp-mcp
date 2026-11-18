@@ -76,6 +76,7 @@ func seedStore(t *testing.T, now time.Time) (string, map[string]string) {
 // when the test ends (before t.TempDir() removes the directory).
 func storeRootAt(t *testing.T, dir string) *os.Root {
 	t.Helper()
+	requireTemporaryStore(t, dir)
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatal(err)

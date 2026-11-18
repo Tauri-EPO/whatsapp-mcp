@@ -131,6 +131,9 @@ func TestReplyRESTWireStoredPreview(t *testing.T) {
 				if resp.StatusCode != http.StatusOK {
 					t.Fatalf("HTTP %d: %s", resp.StatusCode, responseBody)
 				}
+				if outgoing == "image" {
+					assertTestCachedMedia(t, chat, "REPLY1", path)
+				}
 				m := &waE2E.Message{}
 				if err := proto.Unmarshal(wire, m); err != nil {
 					t.Fatal(err)
@@ -289,6 +292,9 @@ func TestReplyRESTWireStoredAuthor(t *testing.T) {
 				<-handlerDone
 				if resp.StatusCode != http.StatusOK {
 					t.Fatalf("HTTP %d: %s", resp.StatusCode, responseBody)
+				}
+				if outgoing == "image" {
+					assertTestCachedMedia(t, outboundReplyGroup.String(), "REPLYAUTHOR", path)
 				}
 				m := &waE2E.Message{}
 				if err := proto.Unmarshal(wire, m); err != nil {

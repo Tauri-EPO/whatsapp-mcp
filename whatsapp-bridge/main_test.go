@@ -86,6 +86,7 @@ const testMemoryDSN = "file::memory:?" + sqliteTimeFormat
 
 func newTestMessageStore(t testing.TB) *MessageStore {
 	t.Helper()
+	testStoreDir(t)
 	db, err := sql.Open("sqlite", testMemoryDSN)
 	if err != nil {
 		t.Fatalf("failed to open in-memory db: %v", err)
@@ -616,10 +617,9 @@ func testLogger() waLog.Logger {
 // Shutdown waits for the worker.
 func testBridge(t *testing.T, client *whatsmeow.Client, ms *MessageStore, logger waLog.Logger) *Bridge {
 	t.Helper()
-	// The store root is what the sweep and /api/media/purge delete through. A
-	// test that set WHATSAPP_STORE_DIR (every test that touches media) gets one
-	// over its own temp store; the rest get nil, and those code paths then
-	// report the store as unavailable instead of falling back to raw paths.
+	// Media writes also use storeDir(), independently of the in-memory DB.
+	// Share an explicitly supplied temp store, or allocate one for this test.
+	testStoreDir(t)
 	storeRoot, rootErr := openStoreRoot()
 	if rootErr == nil {
 		t.Cleanup(func() { _ = storeRoot.Close() })
