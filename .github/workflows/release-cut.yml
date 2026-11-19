@@ -111,8 +111,16 @@ jobs:
       # branch when the notes change, so after a docs: / ci: / test: / chore:
       # merge it sits behind main.
       # Hence the loop: bring the branch up to date, approve the pull_request
-      # runs waiting on that head, wait for the CI one, merge exactly that
-      # commit, and go round again if main moved meanwhile.
+      # runs waiting on that head, wait for the CI one and for the ruleset to
+      # be satisfied, merge exactly that commit, and go round again if main
+      # moved meanwhile.
+      # The Security run carries a required check too (Bandit, issue #776) and
+      # the run listing filtered by head, event and branch can leave a waiting
+      # run out: on the 2.13.0 release PR it returned the CI run alone while
+      # the Security run sat in action_required, readable by ID and present in
+      # the unfiltered listing (issue #849). So the runs are read from both
+      # listings, and a run that shows up late is still approved while the
+      # step waits for the pull request to stop being blocked.
       # A CI run dispatched on the branch (workflow_dispatch) is not a way
       # round the approval: its jobs pass and sit on the same commit, but the
       # pull request does not list them and the ruleset keeps it blocked
@@ -125,6 +133,38 @@ jobs:
           BRANCH: release-please--branches--main
           DRY_RUN: ${{ inputs.dry_run == true }}
         run: |
+          # "id path state" of the pull_request runs of commit $1 that belong
+          # to this repository's own release branch (a fork can open a pull
+          # request on the same commit; its runs are not ours to approve),
+          # oldest first. The filtered listing and the newest 100 runs of the
+          # repository, merged: either one failing leaves the other.
+          head_runs() {
+            {
+              gh api "repos/$GH_REPO/actions/runs?head_sha=$1&event=pull_request&branch=$BRANCH&per_page=100" --jq '.workflow_runs[]' || true
+              gh api "repos/$GH_REPO/actions/runs?per_page=100" --jq '.workflow_runs[]' || true
+            } | jq -s -r --arg sha "$1" '
+              map(select(.head_sha == $sha and .event == "pull_request"
+                and .head_repository.full_name == env.GH_REPO and .head_branch == env.BRANCH))
+              | unique_by(.id) | sort_by(.created_at)
+              | .[] | "\(.id) \(.path) \(.conclusion // .status)"'
+          }
+          # Approves, once each, the runs of the listing $2 still waiting.
+          approved=""
+          approve_waiting() {
+            local id path state
+            while read -r id path state; do
+              [ -n "$id" ] && [ "$state" = "action_required" ] || continue
+              case " $approved " in
+                *" $id "*) ;;
+                *)
+                  echo "attempt $1: approving run $id ($path) on the release PR head"
+                  gh api -X POST "repos/$GH_REPO/actions/runs/$id/approve" > /dev/null \
+                    || echo "::warning::could not approve run $id; if it is still waiting the cut stops below"
+                  approved="$approved $id"
+                  ;;
+              esac
+            done <<< "$2"
+          }
           for attempt in 1 2 3; do
             sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
             behind=$(gh api "repos/$GH_REPO/compare/$BRANCH...main" --jq .ahead_by)
@@ -148,31 +188,19 @@ jobs:
               fi
             fi
             run=""
-            approved=""
             for _ in $(seq 1 36); do
-              # The pull_request runs of this head, from this repository's own
-              # release branch only (a fork can open a pull request on the same
-              # commit; its runs are not ours to approve), oldest first so the
-              # newest CI run is the one kept. A run still waiting gets its
-              # approval once (Security too, so nothing is left pending on the
-              # PR) and is not picked yet: the approval starts a new attempt of
-              # the same run a moment later, and until then the run still reads
-              # as finished with action_required, which `gh run watch` would
-              # take for a failure. A failed poll is simply tried again.
-              runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$sha&event=pull_request&branch=$BRANCH&per_page=100" \
-                --jq '[.workflow_runs[] | select(.head_repository.full_name == env.GH_REPO and .head_branch == env.BRANCH)] | sort_by(.created_at) | .[] | "\(.id) \(.path) \(.conclusion // .status)"') || runs=""
+              # The runs of this head, oldest first so the newest CI run is
+              # the one kept. A run still waiting gets its approval once
+              # (Security too: its Bandit job is a required check) and is not
+              # picked yet: the approval starts a new attempt of the same run a
+              # moment later, and until then the run still reads as finished
+              # with action_required, which `gh run watch` would take for a
+              # failure. A failed poll is simply tried again.
+              runs=$(head_runs "$sha") || runs=""
+              approve_waiting "$attempt" "$runs"
               while read -r id path state; do
                 [ -n "$id" ] || continue
                 if [ "$state" = "action_required" ]; then
-                  case " $approved " in
-                    *" $id "*) ;;
-                    *)
-                      echo "attempt $attempt: approving run $id ($path) on the release PR head"
-                      gh api -X POST "repos/$GH_REPO/actions/runs/$id/approve" > /dev/null \
-                        || echo "::warning::could not approve run $id; if it is still waiting the cut stops below"
-                      approved="$approved $id"
-                      ;;
-                  esac
                   # A newer CI run that is still waiting outranks an older one
                   # already picked (the PR was closed and reopened on this head).
                   if [ "$path" = ".github/workflows/ci.yml" ]; then
@@ -201,13 +229,31 @@ jobs:
               echo "::error::CI run $run on the release PR head $sha did not succeed; not cutting a release."
               exit 1
             fi
+            # CI passed; the ruleset wants the Security run's Bandit job as
+            # well. Wait for the pull request to stop being blocked (the merge
+            # state also lags the last check by a few seconds), approving any
+            # run of this head that only now shows up as waiting. Thirty
+            # minutes: a Security run approved here starts from nothing.
+            state=UNKNOWN
+            for _ in $(seq 1 180); do
+              state=$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus) || state=UNKNOWN
+              case "$state" in UNKNOWN | BLOCKED) ;; *) break ;; esac
+              runs=$(head_runs "$sha") || runs=""
+              approve_waiting "$attempt" "$runs"
+              sleep 10
+            done
+            if [ "$DRY_RUN" != "true" ] && { [ "$state" = "BLOCKED" ] || [ "$state" = "UNKNOWN" ]; }; then
+              now=$(gh pr view "$PR" --json headRefOid --jq .headRefOid) || now=$sha
+              if [ "$now" != "$sha" ]; then
+                echo "::notice::attempt $attempt: the release branch moved while waiting for its checks; going round again."
+                continue
+              fi
+              echo "::error::Release PR #$PR at $sha is still $state thirty minutes after its CI passed: a check the ruleset requires (Python Lint, Go Build, Docker Build, Bandit Security Scan) is missing or not green on that head; not cutting a release. Checks on the head:"
+              gh pr view "$PR" --json statusCheckRollup \
+                --jq '.statusCheckRollup[] | "  \(.name // .context): \(.conclusion // .status // .state)"' || true
+              exit 1
+            fi
             if [ "$DRY_RUN" = "true" ]; then
-              # The merge state can lag the last check by a few seconds.
-              state=UNKNOWN
-              for _ in $(seq 1 12); do
-                state=$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus) || state=UNKNOWN
-                case "$state" in UNKNOWN | BLOCKED) sleep 5 ;; *) break ;; esac
-              done
               case "$state" in
                 CLEAN | UNSTABLE | HAS_HOOKS)
                   echo "Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would merge it. Nothing was merged."
