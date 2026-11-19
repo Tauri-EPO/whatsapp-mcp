@@ -28,9 +28,10 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "release-cut.yml"
 
 BASH = resolve_bash()
-pytestmark = pytest.mark.skipif(
-    BASH is None or shutil.which("jq") is None, reason=BASH_SKIP_REASON + "; also needs jq (the step pipes into it)"
-)
+pytestmark = [
+    pytest.mark.skipif(BASH is None, reason=BASH_SKIP_REASON),
+    pytest.mark.skipif(shutil.which("jq") is None, reason="jq is not on PATH: the step and its fake gh pipe into it"),
+]
 
 # State files in $FAKE_STATE: `ci` and `sec` hold action_required, in_progress,
 # success or failure; `head` the release PR head; `calls` every invocation.
@@ -50,6 +51,20 @@ run_json() { # id path state [repo] [sha]
     "$1" "$2" "$status" "$concl" "${5:-SHA1}" "${4:-example/repo}" "$1"
 }
 merge_state() { [ "$ci" = success ] && [ "$sec" = success ] && echo CLEAN || echo BLOCKED; }
+check() { # name state: one statusCheckRollup entry, as `gh pr view --json` spells it
+  case "$2" in
+    success) printf '{"name":"%s","status":"COMPLETED","conclusion":"SUCCESS"}' "$1" ;;
+    failure) printf '{"name":"%s","status":"COMPLETED","conclusion":"FAILURE"}' "$1" ;;
+    *) printf '{"name":"%s","status":"IN_PROGRESS","conclusion":""}' "$1" ;;
+  esac
+}
+rollup() { # the checks on the head: none from a run still waiting for approval
+  local items=""
+  [ "$ci" = action_required ] || items=$(check "Python Lint" "$ci")
+  [ "$sec" = action_required ] || items="$items${items:+,}$(check "Bandit Security Scan" "$sec")"
+  [ "$SCENARIO" != unrequired_fails ] || items="$items${items:+,}$(check "CodeQL Analysis (Go)" failure)"
+  printf '[%s]' "$items"
+}
 case "$*" in
   "pr view 848 --json headRefOid --jq .headRefOid") echo "$head" ;;
   "api repos/example/repo/compare/release-please--branches--main...main --jq .ahead_by") echo 0 ;;
@@ -75,18 +90,26 @@ case "$*" in
     if [ "$SCENARIO" = approve_flaky ] && [ ! -e "$S/refused_once" ]; then
       : >"$S/refused_once"; echo "gh: HTTP 502" >&2; exit 1
     fi
-    if [ "$SCENARIO" = security_fails ]; then echo failure >"$S/sec"; else echo in_progress >"$S/sec"; fi ;;
+    case "$SCENARIO" in
+      security_fails) echo failure >"$S/sec" ;;
+      unrequired_fails) echo success >"$S/sec" ;;
+      *) echo in_progress >"$S/sec" ;;
+    esac ;;
   "run watch 1 --exit-status --interval 20") echo success >"$S/ci" ;;
-  "pr view 848 --json mergeStateStatus,headRefOid --jq "*)
+  "pr view 848 --json mergeStateStatus,headRefOid,statusCheckRollup --jq "*)
     # A Security run in progress finishes on the second look at the merge state.
-    if [ "$sec" = in_progress ]; then
-      n=$(($(cat "$S/looks" 2>/dev/null || echo 0) + 1)); echo "$n" >"$S/looks"
-      [ "$n" -lt 2 ] || echo success >"$S/sec"
-    fi
+    n=$(($(cat "$S/looks" 2>/dev/null || echo 0) + 1)); echo "$n" >"$S/looks"
+    if [ "$sec" = in_progress ] && [ "$n" -ge 2 ]; then echo success >"$S/sec"; fi
     sec=$(cat "$S/sec")
     if [ "$SCENARIO" = head_moves ]; then echo SHA2 >"$S/head"; head=SHA2; fi
-    echo "$(merge_state) $head" ;;
-  "pr view 848 --json statusCheckRollup --jq "*) echo "  Python Lint: SUCCESS" ;;
+    state=$(merge_state)
+    # The merge state lags the last check: the first look still reads BLOCKED.
+    if [ "$SCENARIO" = unrequired_fails ] && [ "$n" -lt 2 ]; then state=BLOCKED; fi
+    # The step's own jq expression runs on the raw answer, as in the real gh.
+    printf '{"mergeStateStatus":"%s","headRefOid":"%s","statusCheckRollup":%s}' "$state" "$head" "$(rollup)" \
+      | jq -r "${@: -1}" ;;
+  "pr view 848 --json statusCheckRollup --jq "*)
+    printf '{"statusCheckRollup":%s}' "$(rollup)" | jq -r "${@: -1}" ;;
   "pr merge 848 --squash --delete-branch --match-head-commit SHA1")
     if [ "$(merge_state)" = CLEAN ]; then : >"$S/merged"; else
       echo "X Pull request is not mergeable: the base branch policy prohibits the merge." >&2; exit 1
@@ -135,11 +158,12 @@ def _run(
         "PR": "848",
         "BRANCH": "release-please--branches--main",
         "DRY_RUN": "true" if dry_run else "false",
-        "BLOCKED_WAIT_S": "0" if scenario == "nowhere" else "1800",
+        "BLOCKED_WAIT_S": "0" if scenario == "nowhere" else "5",
+        "BLOCKED_MIN_WAIT_S": "0",
     }
     assert BASH is not None
     done = subprocess.run(
-        bash_command(BASH, script, bin_dir=bin_dir), capture_output=True, text=True, env=env, timeout=180
+        bash_command(BASH, script, bin_dir=bin_dir), capture_output=True, text=True, env=env, timeout=120
     )
     calls = (state / "calls").read_text(encoding="utf-8").splitlines()
     return done, calls, (state / "merged").exists()
@@ -180,7 +204,9 @@ def test_a_pull_request_that_stays_blocked_is_not_merged_and_the_error_names_the
     assert _approved(calls) == ["1"]
     assert not merged and _merge_attempts(calls) == 0
     assert "is still blocked" in done.stdout and "Bandit Security Scan" in done.stdout
+    # The checks on the head, through the step's own projection: Bandit is absent.
     assert "  Python Lint: SUCCESS" in done.stdout
+    assert "  Bandit Security Scan" not in done.stdout
     assert "main keeps moving" not in done.stdout
 
 
@@ -188,10 +214,26 @@ def test_a_failed_security_run_stops_the_cut_without_waiting(tmp_path):
     done, calls, merged = _run(tmp_path, "security_fails")
 
     assert done.returncode == 1
-    assert ".github/workflows/security.yml (run 2): failure" in done.stdout
+    assert "did not succeed (Bandit Security Scan: FAILURE)" in done.stdout
     assert not merged and _merge_attempts(calls) == 0
-    # One look at the merge state, not a wait: the budget here is 1800 s.
+    # One look at the merge state, not a wait: the budget here is 5 s of polling.
     assert sum(c.startswith("pr view 848 --json mergeStateStatus") for c in calls) == 1
+
+
+def test_a_red_job_the_ruleset_does_not_require_does_not_stop_the_cut(tmp_path):
+    done, calls, merged = _run(tmp_path, "unrequired_fails")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert merged and _merge_attempts(calls) == 1
+
+
+def test_the_repository_wide_listing_is_not_read_on_every_poll(tmp_path):
+    done, calls, _ = _run(tmp_path, "nowhere")
+
+    assert done.returncode == 1
+    filtered = sum("actions/runs?head_sha=SHA1" in c for c in calls)
+    deep = sum("actions/runs?per_page=100&page=1" in c for c in calls)
+    assert filtered > deep >= 1
 
 
 def test_a_refused_approval_is_tried_again(tmp_path):
