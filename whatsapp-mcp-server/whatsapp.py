@@ -6579,6 +6579,7 @@ WEBHOOK_FILTER_FIELDS = (
     "forward_broadcasts",
     "authorization_set",
 )
+WEBHOOK_CHAT_FILTER_MODES = ("all", "list")
 
 
 def _safe_webhook_reason(reason: Any) -> str:
@@ -6617,6 +6618,16 @@ def _webhook_status(
     fields = (*WEBHOOK_STATUS_FIELDS, *WEBHOOK_FILTER_FIELDS) if detail else WEBHOOK_COMPACT_FIELDS
     out = {field: view[field] for field in fields if field in view}
     out["reason"] = _safe_webhook_reason(out["reason"])
+    # Optional (older bridges omit it): the receiver list's mode and size only,
+    # rebuilt from validated values so no entry can pass through.
+    chats = view.get("allowed_chats") if detail else None
+    if (
+        isinstance(chats, dict)
+        and chats.get("mode") in WEBHOOK_CHAT_FILTER_MODES
+        and type(chats.get("entries")) is int
+        and chats["entries"] >= 0
+    ):
+        out["allowed_chats"] = {"mode": chats["mode"], "entries": chats["entries"]}
     return out
 
 

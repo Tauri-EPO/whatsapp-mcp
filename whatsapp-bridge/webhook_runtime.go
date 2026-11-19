@@ -74,21 +74,56 @@ type runtimeWebhookConfig struct {
 	ForwardSelf       *bool    `json:"forward_self,omitempty"`
 	ForwardChannels   *bool    `json:"forward_channels,omitempty"`
 	ForwardBroadcasts *bool    `json:"forward_broadcasts,omitempty"`
+	// Receiver-only chat list for message.received; nil (absent or null) = every
+	// chat the effective chat policy allows. Never echoed: views show its size.
+	AllowedChats *[]string `json:"allowed_chats,omitempty"`
+}
+
+// maxWebhookAllowedChats bounds the list: a direct message from a phone checks
+// every exact LID entry for a twin (allowsIdentity), so the per-message cost on
+// the receive path grows with it, and the whole PUT stays within its body limit.
+const maxWebhookAllowedChats = 100
+
+// webhookChatFilter is the sanitized receiver list: its mode ("all" or "list")
+// and its number of entries, never the entries themselves.
+type webhookChatFilter struct {
+	Mode    string `json:"mode"`
+	Entries int    `json:"entries"`
+}
+
+var allChatsFilter = webhookChatFilter{Mode: "all"}
+
+// receiverChatPolicy validates allowed_chats with the chats.allowed parser. A
+// present list is always restrictive, so [] admits nothing (fail closed).
+func receiverChatPolicy(list *[]string) (*chatPolicy, webhookChatFilter, error) {
+	if list == nil {
+		return nil, allChatsFilter, nil
+	}
+	if len(*list) > maxWebhookAllowedChats {
+		return nil, webhookChatFilter{}, errors.New("allowed_chats accepts at most " + strconv.Itoa(maxWebhookAllowedChats) + " entries")
+	}
+	policy, err := parseChatEntries(*list)
+	if err != nil {
+		return nil, webhookChatFilter{}, errors.New("allowed_chats: " + err.Error())
+	}
+	policy.restricted, policy.source = true, "receiver allowed_chats"
+	return &policy, webhookChatFilter{Mode: "list", Entries: len(policy.entries())}, nil
 }
 
 type runtimeWebhookState struct {
 	runtimeWebhookFilters
-	URL          string     `json:"url"`
-	Enabled      bool       `json:"enabled"`
-	Events       []string   `json:"events"`
-	HeaderPrefix string     `json:"header_prefix"`
-	Fingerprint  string     `json:"secret_fingerprint"`
-	AuthSet      bool       `json:"authorization_set"`
-	Failures     int        `json:"consecutive_failures"`
-	LastSuccess  *time.Time `json:"last_success"`
-	Reason       string     `json:"reason"`
-	Queued       int        `json:"queued"`
-	Dropped      uint64     `json:"dropped"`
+	URL          string            `json:"url"`
+	Enabled      bool              `json:"enabled"`
+	Events       []string          `json:"events"`
+	HeaderPrefix string            `json:"header_prefix"`
+	Fingerprint  string            `json:"secret_fingerprint"`
+	AuthSet      bool              `json:"authorization_set"`
+	AllowedChats webhookChatFilter `json:"allowed_chats"`
+	Failures     int               `json:"consecutive_failures"`
+	LastSuccess  *time.Time        `json:"last_success"`
+	Reason       string            `json:"reason"`
+	Queued       int               `json:"queued"`
+	Dropped      uint64            `json:"dropped"`
 }
 
 type runtimeWebhookEvent struct {
@@ -118,6 +153,7 @@ type runtimeWebhookDelivery struct {
 type runtimeWebhookGeneration struct {
 	config  runtimeWebhookConfig
 	filters runtimeWebhookFilters
+	chats   *chatPolicy // receiver allowed_chats; nil admits every chat
 	ctx     context.Context
 	cancel  context.CancelFunc
 	queue   chan runtimeWebhookDelivery
@@ -160,6 +196,9 @@ func (w *runtimeWebhook) snapshot() runtimeWebhookState {
 	defer w.mu.Unlock()
 	s := w.state
 	s.Events = append([]string{}, s.Events...)
+	if s.AllowedChats.Mode == "" {
+		s.AllowedChats = allChatsFilter // no receiver: nothing narrows
+	}
 	if w.generation != nil {
 		s.Queued = len(w.generation.queue)
 	}
@@ -410,6 +449,10 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 	if !validWebhookPrefix(cfg.HeaderPrefix) {
 		return errors.New("header_prefix must be an X- prefixed HTTP token of 3-48 characters")
 	}
+	chats, chatFilter, err := receiverChatPolicy(cfg.AllowedChats)
+	if err != nil {
+		return err
+	}
 	u, _, err := w.receiver(ctx, cfg.URL)
 	if err != nil {
 		return err
@@ -424,11 +467,11 @@ func (w *runtimeWebhook) configure(ctx context.Context, cfg runtimeWebhookConfig
 		w.drainLocked(prev, "configuration_changed")
 	}
 	child, cancel := context.WithCancel(w.ctx)
-	g := &runtimeWebhookGeneration{config: cfg, filters: filters, ctx: child, cancel: cancel, queue: make(chan runtimeWebhookDelivery, 256), delivery: make(chan struct{}, 1)}
+	g := &runtimeWebhookGeneration{config: cfg, filters: filters, chats: chats, ctx: child, cancel: cancel, queue: make(chan runtimeWebhookDelivery, 256), delivery: make(chan struct{}, 1)}
 	g.client = w.client(g, u)
 	sum := sha256.Sum256([]byte(cfg.Secret))
 	u.RawQuery, u.ForceQuery = "", false
-	w.state = runtimeWebhookState{runtimeWebhookFilters: filters, URL: u.String(), Enabled: true, Events: append([]string{}, cfg.Events...), HeaderPrefix: cfg.HeaderPrefix, Fingerprint: hex.EncodeToString(sum[:8]), AuthSet: cfg.Authorization != ""}
+	w.state = runtimeWebhookState{runtimeWebhookFilters: filters, URL: u.String(), Enabled: true, Events: append([]string{}, cfg.Events...), HeaderPrefix: cfg.HeaderPrefix, Fingerprint: hex.EncodeToString(sum[:8]), AuthSet: cfg.Authorization != "", AllowedChats: chatFilter}
 	w.generation = g
 	if replay && w.lastConnection != nil {
 		w.enqueueLocked(g, runtimeWebhookEvent{Event: "connection.changed", connection: w.lastConnection})
@@ -709,7 +752,8 @@ func (b *Bridge) handleRuntimeWebhook(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, 200, b.RuntimeWebhook.snapshot())
 	case http.MethodPut:
-		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		// Room for the longest URL and authorization plus a full allowed_chats.
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
 		var cfg runtimeWebhookConfig

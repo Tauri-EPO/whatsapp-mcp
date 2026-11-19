@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -169,6 +170,18 @@ func parseChatPolicy(raw string) chatPolicy {
 	}
 	p.restricted = len(p.exact) > 0 || len(p.servers) > 0
 	return p
+}
+
+// parseChatEntries is the one parser for an explicit runtime list of entries
+// (chats.allowed, the receiver's allowed_chats). An entry that can never match
+// would silently deny every chat, so it is refused instead of retained.
+func parseChatEntries(entries []string) (chatPolicy, error) {
+	for _, entry := range entries {
+		if !chatEntryPattern.MatchString(strings.TrimSpace(entry)) {
+			return chatPolicy{}, errors.New("expected each chat entry to be a JID, a digits-only number or a *@server wildcard")
+		}
+	}
+	return parseChatPolicy(strings.Join(entries, ",")), nil
 }
 
 func loadChatPolicy() chatPolicy {

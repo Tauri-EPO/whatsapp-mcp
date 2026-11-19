@@ -97,8 +97,14 @@ func (b *Bridge) messageWebhookAllowed(policy chatPolicyResolver, chat types.JID
 		b.Log.Debugf("Message not forwarded: chat allow-list")
 		return false, nil
 	}
+	// The receiver's own list only narrows that receiver, after the effective
+	// policy; withholding here is a choice, not a delivery loss (nothing queued).
+	byList := runtime != nil && runtime.chats != nil && !b.webhookIdentityAllowed(*runtime.chats, chat, original...)
+	if byList {
+		runtime = nil
+	}
 	if !legacy && runtime == nil {
-		b.logWebhookWithheld(chat, fromMe, receiver)
+		b.logWebhookWithheld(chat, fromMe, receiver, byList)
 	}
 	return legacy, runtime
 }
@@ -157,7 +163,7 @@ var webhookFilterEnv = map[string]string{"forward_self": forwardSelfEnv, "forwar
 
 // Names what withheld the message from each sender: a deployment key or the
 // runtime receiver's own filter. Never the chat or message identifiers.
-func (b *Bridge) logWebhookWithheld(chat types.JID, fromMe bool, receiver *runtimeWebhookGeneration) {
+func (b *Bridge) logWebhookWithheld(chat types.JID, fromMe bool, receiver *runtimeWebhookGeneration, byList bool) {
 	origin := func(filter string, cfg *runtimeWebhookConfig) string {
 		if filter == "namespace" {
 			return fmt.Sprintf("namespace %q", chat.Server)
@@ -171,7 +177,9 @@ func (b *Bridge) logWebhookWithheld(chat types.JID, fromMe bool, receiver *runti
 	if b.Webhook.Enabled() {
 		legacy = origin(b.webhookFilters().withheldBy(chat, fromMe), nil)
 	}
-	if receiver != nil {
+	if byList {
+		runtime = "receiver filter allowed_chats"
+	} else if receiver != nil {
 		runtime = origin(receiver.filters.withheldBy(chat, fromMe), &receiver.config)
 	}
 	b.Log.Debugf("Message not forwarded: legacy webhook: %s; runtime webhook: %s", legacy, runtime)
