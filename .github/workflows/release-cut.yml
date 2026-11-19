@@ -194,12 +194,16 @@ jobs:
           # One look at the pull request: "<merge state> <head> <failed>",
           # where <failed> lists the checks the ruleset requires that ended
           # red on that head. Only those: a red job the ruleset does not
-          # require (CodeQL, an image scan) never stopped a cut.
+          # require (CodeQL, an image scan) never stopped a cut. A check counts
+          # as red when every entry of that name is: a pull request closed and
+          # reopened on the same head keeps the cancelled entry of its first
+          # run next to the one that is running or green.
           # shellcheck disable=SC2016 # $n and $c are jq variables
           look_jq='"\(.mergeStateStatus) \(.headRefOid) \([.statusCheckRollup[]?
-            | select(.name as $n | ["Python Lint", "Go Build", "Docker Build", "Bandit Security Scan"] | index($n))
-            | select(.conclusion as $c | ["FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"] | index($c))
-            | "\(.name): \(.conclusion)"] | unique | join(", "))"'
+            | select(.name as $n | ["Python Lint", "Go Build", "Docker Build", "Bandit Security Scan"] | index($n))]
+            | group_by(.name)
+            | map(select(all(.[]; .conclusion as $c | ["FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"] | index($c))))
+            | map("\(.[0].name): \(.[0].conclusion)") | join(", "))"'
           for attempt in 1 2 3; do
             sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
             behind=$(gh api "repos/$GH_REPO/compare/$BRANCH...main" --jq .ahead_by)

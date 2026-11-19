@@ -55,6 +55,7 @@ check() { # name state: one statusCheckRollup entry, as `gh pr view --json` spel
   case "$2" in
     success) printf '{"name":"%s","status":"COMPLETED","conclusion":"SUCCESS"}' "$1" ;;
     failure) printf '{"name":"%s","status":"COMPLETED","conclusion":"FAILURE"}' "$1" ;;
+    cancelled) printf '{"name":"%s","status":"COMPLETED","conclusion":"CANCELLED"}' "$1" ;;
     *) printf '{"name":"%s","status":"IN_PROGRESS","conclusion":""}' "$1" ;;
   esac
 }
@@ -63,6 +64,8 @@ rollup() { # the checks on the head: none from a run still waiting for approval
   [ "$ci" = action_required ] || items=$(check "Python Lint" "$ci")
   [ "$sec" = action_required ] || items="$items${items:+,}$(check "Bandit Security Scan" "$sec")"
   [ "$SCENARIO" != unrequired_fails ] || items="$items${items:+,}$(check "CodeQL Analysis (Go)" failure)"
+  # Closed and reopened on this head: the first CI run's cancelled entry stays.
+  [ "$SCENARIO" != reopened ] || items="$(check "Python Lint" cancelled)${items:+,}$items"
   printf '[%s]' "$items"
 }
 case "$*" in
@@ -92,7 +95,7 @@ case "$*" in
     fi
     case "$SCENARIO" in
       security_fails) echo failure >"$S/sec" ;;
-      unrequired_fails) echo success >"$S/sec" ;;
+      unrequired_fails | reopened) echo success >"$S/sec" ;;
       *) echo in_progress >"$S/sec" ;;
     esac ;;
   "run watch 1 --exit-status --interval 20") echo success >"$S/ci" ;;
@@ -104,7 +107,7 @@ case "$*" in
     if [ "$SCENARIO" = head_moves ]; then echo SHA2 >"$S/head"; head=SHA2; fi
     state=$(merge_state)
     # The merge state lags the last check: the first look still reads BLOCKED.
-    if [ "$SCENARIO" = unrequired_fails ] && [ "$n" -lt 2 ]; then state=BLOCKED; fi
+    case "$SCENARIO" in unrequired_fails | reopened) [ "$n" -ge 2 ] || state=BLOCKED ;; esac
     # The step's own jq expression runs on the raw answer, as in the real gh.
     printf '{"mergeStateStatus":"%s","headRefOid":"%s","statusCheckRollup":%s}' "$state" "$head" "$(rollup)" \
       | jq -r "${@: -1}" ;;
@@ -220,8 +223,11 @@ def test_a_failed_security_run_stops_the_cut_without_waiting(tmp_path):
     assert sum(c.startswith("pr view 848 --json mergeStateStatus") for c in calls) == 1
 
 
-def test_a_red_job_the_ruleset_does_not_require_does_not_stop_the_cut(tmp_path):
-    done, calls, merged = _run(tmp_path, "unrequired_fails")
+@pytest.mark.parametrize("scenario", ["unrequired_fails", "reopened"])
+def test_a_red_entry_that_does_not_block_the_ruleset_does_not_stop_the_cut(tmp_path, scenario):
+    # A job the ruleset does not require, or the cancelled first run of a
+    # required check that a later run of the same name replaced.
+    done, calls, merged = _run(tmp_path, scenario)
 
     assert done.returncode == 0, done.stdout + done.stderr
     assert merged and _merge_attempts(calls) == 1
