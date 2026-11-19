@@ -48,8 +48,9 @@ jobs:
   cut:
     name: Merge the release PR and dispatch release.yml
     runs-on: ubuntu-latest
-    # Three attempts of a CI run each; `gh run watch` has no bound of its own.
-    timeout-minutes: 90
+    # Three attempts of a CI run each (`gh run watch` has no bound of its
+    # own), plus one shared BLOCKED_WAIT_S for the checks CI does not cover.
+    timeout-minutes: 180
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -111,8 +112,17 @@ jobs:
       # branch when the notes change, so after a docs: / ci: / test: / chore:
       # merge it sits behind main.
       # Hence the loop: bring the branch up to date, approve the pull_request
-      # runs waiting on that head, wait for the CI one, merge exactly that
-      # commit, and go round again if main moved meanwhile.
+      # runs waiting on that head, wait for the CI one and for the ruleset to
+      # be satisfied, merge exactly that commit, and go round again if main
+      # moved meanwhile.
+      # The Security run carries a required check too (Bandit, issue #776) and
+      # the run listing filtered by head, event and branch can leave a waiting
+      # run out: on the 2.13.0 release PR it returned the CI run alone while
+      # the Security run sat in action_required, readable by ID and present in
+      # the unfiltered listing (issue #849). So the runs are read from both
+      # listings, and a run that shows up late is still approved while the
+      # step waits for the pull request to stop being blocked.
+      # tests/test_release_cut_workflow.py runs this step against a fake gh.
       # A CI run dispatched on the branch (workflow_dispatch) is not a way
       # round the approval: its jobs pass and sit on the same commit, but the
       # pull request does not list them and the ruleset keeps it blocked
@@ -124,7 +134,76 @@ jobs:
           PR: ${{ steps.pr.outputs.number }}
           BRANCH: release-please--branches--main
           DRY_RUN: ${{ inputs.dry_run == true }}
+          # A Security run approved late starts from nothing: thirty minutes,
+          # one budget for the three attempts. Each attempt still gets the
+          # minimum, for the merge state lags the last check by a few seconds.
+          BLOCKED_WAIT_S: 1800
+          BLOCKED_MIN_WAIT_S: 60
         run: |
+          # "id path state" of the pull_request runs of commit $1 that belong
+          # to this repository's own release branch (a fork can open a pull
+          # request on the same commit; its runs are not ours to approve),
+          # oldest first. The filtered listing always; with $2 = deep also the
+          # newest 300 runs of the repository (a head whose runs are older
+          # than that is out of reach of the fallback). A listing that fails
+          # contributes nothing and leaves the others. The deep read is three
+          # more calls, so the callers ask for it once a minute only: the
+          # workflow token has an hourly quota shared with every other job.
+          head_runs() {
+            local page out
+            {
+              out=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$1&event=pull_request&branch=$BRANCH&per_page=100" --jq '.workflow_runs[]') \
+                && printf '%s\n' "$out"
+              if [ "${2:-}" = "deep" ]; then
+                for page in 1 2 3; do
+                  out=$(gh api "repos/$GH_REPO/actions/runs?per_page=100&page=$page" --jq '.workflow_runs[]') \
+                    && printf '%s\n' "$out"
+                done
+              fi
+              true
+            } | jq -s -r --arg sha "$1" '
+              map(select(.head_sha == $sha and .event == "pull_request"
+                and .head_repository.full_name == env.GH_REPO and .head_branch == env.BRANCH))
+              | unique_by(.id) | sort_by(.created_at)
+              | .[] | "\(.id) \(.path) \(.conclusion // .status)"'
+          }
+          # Approves the runs of the listing $2 still waiting: once each when
+          # the call succeeds, at most three tries when it does not.
+          approved=""
+          refused=""
+          approve_waiting() {
+            local id path state tries
+            while read -r id path state; do
+              [ -n "$id" ] && [ "$state" = "action_required" ] || continue
+              case " $approved " in *" $id "*) continue ;; esac
+              tries=$(tr ' ' '\n' <<< "$refused" | grep -cx "$id" || true)
+              [ "$tries" -lt 3 ] || continue
+              echo "attempt $1: approving run $id ($path) on the release PR head"
+              if gh api -X POST "repos/$GH_REPO/actions/runs/$id/approve" > /dev/null; then
+                approved="$approved $id"
+              else
+                echo "::warning::could not approve run $id (try $((tries + 1)) of 3); if it is still waiting the cut stops below"
+                refused="$refused $id"
+              fi
+            done <<< "$2"
+          }
+          # Seconds spent waiting for a pull request whose CI passed to stop
+          # being blocked, over all attempts: one budget, so three attempts
+          # still fit the job's timeout.
+          waited=0
+          # One look at the pull request: "<merge state> <head> <failed>",
+          # where <failed> lists the checks the ruleset requires that ended
+          # red on that head. Only those: a red job the ruleset does not
+          # require (CodeQL, an image scan) never stopped a cut. A check counts
+          # as red when every entry of that name is: a pull request closed and
+          # reopened on the same head keeps the cancelled entry of its first
+          # run next to the one that is running or green.
+          # shellcheck disable=SC2016 # $n and $c are jq variables
+          look_jq='"\(.mergeStateStatus) \(.headRefOid) \([.statusCheckRollup[]?
+            | select(.name as $n | ["Python Lint", "Go Build", "Docker Build", "Bandit Security Scan"] | index($n))]
+            | group_by(.name)
+            | map(select(all(.[]; .conclusion as $c | ["FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"] | index($c))))
+            | map("\(.[0].name): \(.[0].conclusion)") | join(", "))"'
           for attempt in 1 2 3; do
             sha=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)
             behind=$(gh api "repos/$GH_REPO/compare/$BRANCH...main" --jq .ahead_by)
@@ -148,31 +227,20 @@ jobs:
               fi
             fi
             run=""
-            approved=""
-            for _ in $(seq 1 36); do
-              # The pull_request runs of this head, from this repository's own
-              # release branch only (a fork can open a pull request on the same
-              # commit; its runs are not ours to approve), oldest first so the
-              # newest CI run is the one kept. A run still waiting gets its
-              # approval once (Security too, so nothing is left pending on the
-              # PR) and is not picked yet: the approval starts a new attempt of
-              # the same run a moment later, and until then the run still reads
-              # as finished with action_required, which `gh run watch` would
-              # take for a failure. A failed poll is simply tried again.
-              runs=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$sha&event=pull_request&branch=$BRANCH&per_page=100" \
-                --jq '[.workflow_runs[] | select(.head_repository.full_name == env.GH_REPO and .head_branch == env.BRANCH)] | sort_by(.created_at) | .[] | "\(.id) \(.path) \(.conclusion // .status)"') || runs=""
+            for poll in $(seq 0 35); do
+              # The runs of this head, oldest first so the newest CI run is
+              # the one kept. A run still waiting gets its approval (Security
+              # too: its Bandit job is a required check) and is not picked
+              # yet: the approval starts a new attempt of the same run a
+              # moment later, and until then the run still reads as finished
+              # with action_required, which `gh run watch` would take for a
+              # failure. A failed poll is simply tried again.
+              if [ $((poll % 12)) = 0 ]; then depth=deep; else depth=""; fi
+              runs=$(head_runs "$sha" "$depth") || runs=""
+              approve_waiting "$attempt" "$runs"
               while read -r id path state; do
                 [ -n "$id" ] || continue
                 if [ "$state" = "action_required" ]; then
-                  case " $approved " in
-                    *" $id "*) ;;
-                    *)
-                      echo "attempt $attempt: approving run $id ($path) on the release PR head"
-                      gh api -X POST "repos/$GH_REPO/actions/runs/$id/approve" > /dev/null \
-                        || echo "::warning::could not approve run $id; if it is still waiting the cut stops below"
-                      approved="$approved $id"
-                      ;;
-                  esac
                   # A newer CI run that is still waiting outranks an older one
                   # already picked (the PR was closed and reopened on this head).
                   if [ "$path" = ".github/workflows/ci.yml" ]; then
@@ -188,7 +256,7 @@ jobs:
               sleep 5
             done
             if [ -z "$run" ]; then
-              echo "::error::No approved pull_request CI run appeared for the release PR head $sha within three minutes; not cutting a release."
+              echo "::error::No approved pull_request CI run appeared for the release PR head $sha in 36 polls; not cutting a release."
               exit 1
             fi
             echo "attempt $attempt: CI run $run on the release PR head $sha"
@@ -201,13 +269,65 @@ jobs:
               echo "::error::CI run $run on the release PR head $sha did not succeed; not cutting a release."
               exit 1
             fi
+            # CI passed; the ruleset wants the Security run's Bandit job as
+            # well. Wait for the pull request to stop being blocked (the merge
+            # state also lags the last check by a few seconds), approving any
+            # run of this head that only now shows up as waiting. The wait
+            # ends at once when the head moves or a required check ended red;
+            # state, head and checks come from one read, so a run cancelled
+            # by a new push is never taken for a failure of this head. A look
+            # that fails keeps what the last one read.
+            state=UNKNOWN
+            now=$sha
+            failed=""
+            start=$SECONDS
+            poll=0
+            while :; do
+              if look=$(gh pr view "$PR" --json mergeStateStatus,headRefOid,statusCheckRollup --jq "$look_jq"); then
+                read -r state now failed <<< "$look"
+              fi
+              [ -n "$now" ] || now=$sha
+              [ "$now" = "$sha" ] || break
+              case "$state" in UNKNOWN | BLOCKED | "") ;; *) break ;; esac
+              [ -z "$failed" ] || break
+              if [ $((poll % 6)) = 0 ]; then depth=deep; else depth=""; fi
+              poll=$((poll + 1))
+              runs=$(head_runs "$sha" "$depth") || runs=""
+              approve_waiting "$attempt" "$runs"
+              spent=$((SECONDS - start))
+              if [ $((waited + spent)) -ge "$BLOCKED_WAIT_S" ] && [ "$spent" -ge "$BLOCKED_MIN_WAIT_S" ]; then
+                break
+              fi
+              sleep 10
+            done
+            spent=$((SECONDS - start))
+            waited=$((waited + spent))
+            if [ "$now" != "$sha" ]; then
+              echo "::notice::attempt $attempt: the release branch moved while waiting for its checks; going round again."
+              continue
+            fi
+            case "$state" in
+              UNKNOWN | BLOCKED | "")
+                if [ -n "$failed" ]; then
+                  echo "::error::A required check on the release PR head $sha did not succeed ($failed); not cutting a release."
+                  exit 1
+                fi
+                behind=$(gh api "repos/$GH_REPO/compare/$BRANCH...main" --jq .ahead_by) || behind=0
+                if [ "$behind" != "0" ]; then
+                  echo "::notice::attempt $attempt: main moved while waiting for the release PR's checks; going round again."
+                  continue
+                fi
+                if [ "$state" = "BLOCKED" ]; then
+                  echo "::error::Release PR #$PR at $sha is still blocked ${spent}s after its CI passed: a check the ruleset requires (Python Lint, Go Build, Docker Build, Bandit Security Scan) is missing or not green on that head; not cutting a release. Checks on the head:"
+                else
+                  echo "::error::The merge state of release PR #$PR at $sha could not be read for ${spent}s after its CI passed; not cutting a release. Checks on the head:"
+                fi
+                gh pr view "$PR" --json statusCheckRollup \
+                  --jq '.statusCheckRollup[] | "  \(.name // .context): \([.conclusion, .status, .state] | map(select(. != null and . != "")) | first // "unknown")"' || true
+                exit 1
+                ;;
+            esac
             if [ "$DRY_RUN" = "true" ]; then
-              # The merge state can lag the last check by a few seconds.
-              state=UNKNOWN
-              for _ in $(seq 1 12); do
-                state=$(gh pr view "$PR" --json mergeStateStatus --jq .mergeStateStatus) || state=UNKNOWN
-                case "$state" in UNKNOWN | BLOCKED) sleep 5 ;; *) break ;; esac
-              done
               case "$state" in
                 CLEAN | UNSTABLE | HAS_HOOKS)
                   echo "Dry run: release PR #$PR at $sha is $state after its CI passed; the cut would merge it. Nothing was merged."
