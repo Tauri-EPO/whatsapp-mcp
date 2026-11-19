@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.12.0...v2.13.0) (2026-11-19)
+
+
+### Features
+
+* webhook-only chat allow-list on the runtime receiver (allowed_chats) ([#847](https://github.com/Tauri-EPO/whatsapp-mcp/issues/847)) ([2edc2a2](https://github.com/Tauri-EPO/whatsapp-mcp/commit/2edc2a2c24d3110a79a88314abc386527159a727)), closes [#846](https://github.com/Tauri-EPO/whatsapp-mcp/issues/846)
+
 ## [2.12.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.11.0...v2.12.0) (2026-11-18)
 
 
