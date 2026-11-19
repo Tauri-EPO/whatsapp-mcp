@@ -52,8 +52,8 @@ no-store responses and mutation audit. They are not MCP tools or data-plane rout
 
 | Method and path | Contract |
 |---|---|
-| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, effective `forward_self`, `forward_channels`, `forward_broadcasts` and `forward_status` filters, header prefix, SHA-256 secret fingerprint (first 16 hex characters), `authorization_set` (whether an `authorization` value is configured), consecutive failed events, last success, reason, queued and dropped counts; never the secret or the `authorization` value. |
-| `PUT /operator/v1/webhook` | Replace configuration and re-enable delivery; JSON below, at most 4096 bytes, unknown fields refused. Cancels previous deliveries and resets delivery state. Returns the same safe snapshot as GET. |
+| `GET /operator/v1/webhook` | Receiver scheme/host/path (query omitted), enabled flag, events, effective `forward_self`, `forward_channels`, `forward_broadcasts` and `forward_status` filters, header prefix, SHA-256 secret fingerprint (first 16 hex characters), `authorization_set` (whether an `authorization` value is configured), `allowed_chats` as `{"mode": "all" \| "list", "entries": N}` (never the entries), consecutive failed events, last success, reason, queued and dropped counts; never the secret or the `authorization` value. |
+| `PUT /operator/v1/webhook` | Replace configuration and re-enable delivery; JSON below, at most 16 KiB, unknown fields refused. Cancels previous deliveries and resets delivery state. Returns the same safe snapshot as GET. |
 | `DELETE /operator/v1/webhook` | Remove configuration, cancel in-flight requests and discard the old queue; 204. An already accepted receiver request cannot be recalled. |
 | `POST /operator/v1/webhook/test` | One synchronous synthetic event (`event: webhook.test`, `type: test`), bounded to 12 seconds including admission; 200 with `delivered`, `reason`, `event_id`, or 409 without an enabled receiver. It does not change consecutive failures, last success or automatic disablement. |
 
@@ -104,6 +104,26 @@ has no account identifiers, so selecting it is sufficient.
 Allowed-chat policy still applies to every message. These receiver choices never
 change the legacy `WEBHOOK_URL` sender. Unknown fields, null/nonboolean filters,
 empty event selections, duplicate events and unknown events return 400.
+
+Optional `allowed_chats` is a webhook-only chat list for `message.received`
+(text, media and reactions alike), for a deployment where the agent keeps
+reading every chat but only a few should reach the receiver. It takes the
+entries `chats.allowed` takes, with the same parser: JIDs, digits-only numbers,
+`*@g.us`, `*@s.whatsapp.net` and other `*@server` wildcards, a phone entry also
+admitting its known LID twin and Brazilian mobile ninth-digit spelling (and the
+reverse). Absent or `null` keeps today's behaviour; `[]` delivers no message
+event at all (fail closed). A malformed entry or more than 100 entries returns
+400 and keeps the previous receiver. The cap bounds per-message work on the
+receive path: a direct message from a phone checks each exact LID entry for a
+twin. The list only narrows this receiver: a message goes out when the kind
+filters above, the effective chat policy (`WHATSAPP_ALLOWED_CHATS` ∩ runtime
+`chats.allowed`) and the list all admit it. It never changes MCP tools, bridge
+REST, history, downloads, transcription, the legacy sender, `connection.changed`,
+`storage.warning` or `webhook/test`. A message the list withholds is not queued
+and is not counted as dropped or failed; the DEBUG line says
+`receiver filter allowed_chats` without the chat. Like the secret, the list
+lives only in memory and is replaced by every PUT; GET, health, the bridge view,
+`get_webhook` and `bridge_status` show only its mode and entry count.
 
 HTTPS is mandatory; credentials and fragments are refused. Port 443 is required
 unless `WHATSAPP_WEBHOOK_RUNTIME_ALLOW_PORTS=true`. Every DNS answer is checked

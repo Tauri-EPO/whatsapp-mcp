@@ -31,16 +31,17 @@ type webhookCompactStatus struct {
 
 type webhookStatusView struct {
 	runtimeWebhookFilters
-	Configured  bool       `json:"configured"`
-	Enabled     bool       `json:"enabled"`
-	Events      []string   `json:"events"`
-	AuthSet     bool       `json:"authorization_set"`
-	URL         string     `json:"url"`
-	LastSuccess *time.Time `json:"last_success"`
-	Failures    int        `json:"consecutive_failures"`
-	Reason      string     `json:"reason"`
-	Queued      int        `json:"queued"`
-	Dropped     uint64     `json:"dropped"`
+	Configured   bool              `json:"configured"`
+	Enabled      bool              `json:"enabled"`
+	Events       []string          `json:"events"`
+	AuthSet      bool              `json:"authorization_set"`
+	AllowedChats webhookChatFilter `json:"allowed_chats"`
+	URL          string            `json:"url"`
+	LastSuccess  *time.Time        `json:"last_success"`
+	Failures     int               `json:"consecutive_failures"`
+	Reason       string            `json:"reason"`
+	Queued       int               `json:"queued"`
+	Dropped      uint64            `json:"dropped"`
 }
 
 func (s webhookStatusView) compact() webhookCompactStatus {
@@ -49,14 +50,14 @@ func (s webhookStatusView) compact() webhookCompactStatus {
 
 func (b *Bridge) webhookStatus() webhookStatusView {
 	if b.RuntimeWebhook == nil {
-		return webhookStatusView{Events: []string{}, Reason: "runtime webhook disabled"}
+		return webhookStatusView{Events: []string{}, AllowedChats: allChatsFilter, Reason: "runtime webhook disabled"}
 	}
 	s := b.RuntimeWebhook.snapshot()
 	if s.URL == "" {
-		return webhookStatusView{Events: []string{}, Reason: "runtime webhook has no destination"}
+		return webhookStatusView{Events: []string{}, AllowedChats: allChatsFilter, Reason: "runtime webhook has no destination"}
 	}
 	return webhookStatusView{
-		runtimeWebhookFilters: s.runtimeWebhookFilters, Events: s.Events, AuthSet: s.AuthSet,
+		runtimeWebhookFilters: s.runtimeWebhookFilters, Events: s.Events, AuthSet: s.AuthSet, AllowedChats: s.AllowedChats,
 		Configured: true, Enabled: s.Enabled, URL: maskedWebhookURL(s.URL),
 		LastSuccess: s.LastSuccess, Failures: s.Failures, Reason: safeWebhookReason(s.Reason),
 		Queued: s.Queued, Dropped: s.Dropped,

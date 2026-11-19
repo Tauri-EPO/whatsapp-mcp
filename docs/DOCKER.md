@@ -92,6 +92,11 @@ variable is a ceiling (runtime true returns 400); an absent or empty variable
 permits receiver opt-in. Compose's default `FORWARD_SELF=false` therefore blocks
 runtime self-message opt-in unless changed at deploy time. Status posts still
 require deploy-time `WEBHOOK_FORWARD_STATUS=true`; PUT cannot change it.
+Optional `allowed_chats` (the `chats.allowed` entry grammar, at most 100) limits
+which chats this receiver gets message events for, without changing what the
+agent can read: absent or `null` keeps every allowed chat, `[]` sends none, and
+it can never reach past `WHATSAPP_ALLOWED_CHATS` or runtime `chats.allowed`.
+Views report only `{"mode", "entries"}`; see `docs/CONFIGURATION.md`.
 GET returns selected events, effective filters, a fingerprint and delivery
 state; health includes the same safe snapshot. Test returns the actual delivery
 outcome. DELETE removes the receiver and cancels pending delivery. Configure it

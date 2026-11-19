@@ -95,13 +95,11 @@ func settingDefinitions() []settingDefinition {
 			if json.Unmarshal(raw, &entries) != nil || len(entries) == 0 {
 				return nil, errors.New("expected a nonempty array of chat entries; use null to clear")
 			}
-			for _, entry := range entries {
-				// An entry that can never match would silently deny every chat.
-				if !chatEntryPattern.MatchString(strings.TrimSpace(entry)) {
-					return nil, errors.New("expected each chat entry to be a JID, a digits-only number or a *@server wildcard")
-				}
+			policy, err := parseChatEntries(entries)
+			if err != nil {
+				return nil, err
 			}
-			return parseChatPolicy(strings.Join(entries, ",")).entries(), nil
+			return policy.entries(), nil
 		}, func(raw string) (any, error) { return parseChatPolicy(raw).entries(), nil }},
 		sendSetting("send.rate_per_minute", sendRateMinuteEnv),
 		sendSetting("send.rate_per_day", sendRateDayEnv),

@@ -321,6 +321,8 @@ def get_webhook() -> dict[str, Any]:
 
     Returns configured, enabled, a bridge-masked url, events, forward_self,
     forward_status, forward_channels, forward_broadcasts, authorization_set (boolean only),
+    allowed_chats ({mode: all|list, entries: count}; the receiver's own chat list
+    for message events, never its JIDs; it does not restrict any tool),
     last_success, consecutive_failures, reason, queued and dropped. No destination
     means configured=false. Runtime disabled returns a clear not_found error.
     WHATSAPP_STATUS_DETAIL=false keeps only configured, enabled, consecutive_failures
@@ -363,7 +365,8 @@ def bridge_status(detail: bool = False) -> dict[str, Any]:
     the runtime receiver; unavailable status is explicit. It never changes ok.
     detail=true adds url (already masked by the bridge), last_success, queued
     and dropped, plus events, forwarding filters (including forward_status) and
-    authorization_set (boolean), only when get_webhook is permitted and available.
+    authorization_set (boolean) and allowed_chats (mode and entry count only), only
+    when get_webhook is permitted and available.
     Full paths, query strings and webhook credentials stay private.
 
     Pass detail=true only when you need deployment internals: before planning
