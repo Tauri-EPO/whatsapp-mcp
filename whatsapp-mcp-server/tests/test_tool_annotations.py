@@ -5,7 +5,8 @@ read-only / destructive hints, and a client without them falls back to the spec
 defaults (destructive, open world). The check walks the tools the server really
 registered, so a tool added without annotations fails here, and it stays in step
 with the enforced policy: an annotation may be more cautious than
-``@mutating_tool``, never less.
+``@mutating_tool``, never less. The values matter too: every ``delete*``,
+``leave*`` and ``block*`` tool must stay a destructive write (#856).
 
 The second half covers the split of ``get_group_invite_link``: the read keeps the
 old name and is annotated read-only, revoking the link is
@@ -103,6 +104,38 @@ def test_mutating_tools_are_never_annotated_read_only():
     for name in READ_ONLY_DESPITE_POLICY:
         assert name in mutating_tools()
         assert annotations[name].read_only_hint is True
+
+
+# Tools that delete or cut off access, picked by name from the live registry so a
+# new delete_*/leave_*/block_* tool is covered without editing this file (#856).
+DESTRUCTIVE_PREFIXES = ("delete", "leave", "block")
+# Matched on 2026-11-20: block_contact, delete_chat, delete_message,
+# delete_messages_for_me, leave_group. Fewer means the pattern broke, not that
+# the tools went away.
+MIN_DESTRUCTIVE_PREFIX_TOOLS = 5
+
+
+def destructive_prefix_tools(annotations: dict[str, ToolAnnotations]) -> list[str]:
+    return sorted(name for name in annotations if name.startswith(DESTRUCTIVE_PREFIXES))
+
+
+def test_the_destructive_prefixes_match_real_tools():
+    assert len(destructive_prefix_tools(_annotations())) >= MIN_DESTRUCTIVE_PREFIX_TOOLS
+
+
+def test_delete_leave_and_block_tools_are_destructive_writes():
+    annotations = _annotations()
+    wrong = {
+        name: (annotations[name].read_only_hint, annotations[name].destructive_hint)
+        for name in destructive_prefix_tools(annotations)
+        if (annotations[name].read_only_hint, annotations[name].destructive_hint) != (False, True)
+    }
+    assert wrong == {}, "expected readOnlyHint=False, destructiveHint=True"
+
+
+def test_the_read_only_exceptions_never_cover_a_destructive_tool():
+    """READ_ONLY_DESPITE_POLICY is for reads the policy gates, never for deletes."""
+    assert not [name for name in READ_ONLY_DESPITE_POLICY if name.startswith(DESTRUCTIVE_PREFIXES)]
 
 
 def test_local_writes_are_not_annotated_read_only():
