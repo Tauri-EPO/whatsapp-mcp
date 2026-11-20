@@ -42,12 +42,20 @@ def declared_arguments(tool: Tool) -> set[str]:
     return {field.alias or name for name, field in tool.fn_metadata.arg_model.model_fields.items()}
 
 
+# Arguments a tool used to accept that became a tool of their own: the refusal
+# says where the capability went instead of only listing what is accepted.
+MOVED_ARGUMENTS: dict[tuple[str, str], str] = {
+    ("get_group_invite_link", "reset"): "to revoke the link and create a new one, call reset_group_invite_link",
+}
+
+
 def _refusal(name: str, unknown: list[str], declared: set[str]) -> CallToolResult:
     valid = ", ".join(sorted(declared)) or "(no arguments)"
+    moved = "".join(f"; {MOVED_ARGUMENTS[(name, arg)]}" for arg in unknown if (name, arg) in MOVED_ARGUMENTS)
     return tool_error_result(
         ToolError(
             "invalid_argument",
-            f"{name} has no argument(s) {', '.join(unknown)}; it accepts: {valid}",
+            f"{name} has no argument(s) {', '.join(unknown)}; it accepts: {valid}{moved}",
         ).to_dict()
     )
 

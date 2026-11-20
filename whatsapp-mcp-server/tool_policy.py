@@ -42,8 +42,12 @@ Deliberately *not* mutating:
 
 Deliberately mutating even though it reads:
 
-- ``get_group_invite_link`` — ``reset=True`` revokes the current link, and a link
-  is group access that can be leaked. Blocked wholesale rather than per-argument.
+- ``get_group_invite_link`` — it only reads the current link (its MCP annotation
+  says ``readOnlyHint``), but a link is group access that can be leaked, so
+  read-only mode still blocks it. Revoking the link moved to its own tool,
+  ``reset_group_invite_link`` (issue #851); naming ``get_group_invite_link`` in an
+  allow or deny list still binds it (``IMPLIED_BY``), so a list written before
+  the split keeps exactly the power it had.
 """
 
 from __future__ import annotations
@@ -73,6 +77,12 @@ DOWNLOAD_TOOL = "download_media"
 
 # Populated by @mutating_tool at import time; see module docstring.
 _MUTATING: set[str] = set()
+
+# A tool split off another one -> the older name. The older name in an allow or
+# deny list also allows or denies the split-off tool, so the split never widens
+# or narrows a list written before it (issue #851). The bridge mirrors this map
+# (toolImpliedBy in whatsapp-bridge/tool_policy.go).
+IMPLIED_BY: dict[str, str] = {"reset_group_invite_link": "get_group_invite_link"}
 
 
 def parse_bool_env(raw: str | None, var: str) -> bool:
@@ -111,9 +121,10 @@ class ToolPolicy:
     deny_sources: Mapping[str, str] = field(default_factory=dict, compare=False)
 
     def allows(self, name: str) -> bool:
-        if name in self.deny:
+        older = IMPLIED_BY.get(name)
+        if name in self.deny or older in self.deny:
             return False
-        if self.allow and name not in self.allow:
+        if self.allow and name not in self.allow and older not in self.allow:
             return False
         return not (self.read_only and name in _MUTATING)
 
@@ -122,6 +133,9 @@ class ToolPolicy:
         return tuple(sorted(name for name in _MUTATING if not self.allows(name)))
 
     def denial_message(self, name: str) -> str:
+        older = IMPLIED_BY.get(name)
+        if older in self.deny and name not in self.deny:
+            return f"{self.denial_message(older)}, and that also disables {name}"
         if name in self.deny:
             if name in self.deny_sources:
                 return f"{name} is disabled: {self.deny_sources[name]} denies it"

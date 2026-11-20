@@ -156,7 +156,9 @@ def test_update_invite_leave_typing(calls):
     assert calls[-1][1] == {"group_jid": GROUP, "description": ""}
     assert main.update_group(GROUP)["error"]["code"] == "invalid_argument"
 
-    out = main.get_group_invite_link(GROUP, reset=True)
+    out = main.get_group_invite_link(GROUP)
+    assert out["link"].startswith("https://chat.whatsapp.com/") and calls[-1][1] == {"group_jid": GROUP, "reset": False}
+    out = main.reset_group_invite_link(GROUP)
     assert out["link"].startswith("https://chat.whatsapp.com/") and calls[-1][1] == {"group_jid": GROUP, "reset": True}
 
     assert main.leave_group(GROUP)["success"] is True and calls[-1][0] == "/group/leave"
