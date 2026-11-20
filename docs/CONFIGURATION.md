@@ -678,11 +678,11 @@ Why this matters: an agent that reads any group or forwarded message is reading
 attacker-controlled text. Told "never send without approval", it is one prompt
 injection away from sending. With read-only on there is no send tool to call.
 
-**Blocked** (22 tools / 20 endpoints): `send_message`, `send_file`,
+**Blocked** (23 tools / 20 endpoints): `send_message`, `send_file`,
 `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`,
 `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`,
 `manage_group_participants`, `update_group`, `get_group_invite_link`,
-`leave_group`, `purge_media`, `request_history`, `create_group`, `test_webhook`; on the bridge `/api/send`, `/api/react`,
+`reset_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `create_group`, `test_webhook`; on the bridge `/api/send`, `/api/react`,
 `/api/typing`, `/api/chat/archive`, `/api/chat/delete`, `/api/block`, `/api/chat/label`, `/api/mark-read`, `/api/delete`, `/api/delete-for-me`, `/api/edit`, `/api/forward`,
 `/api/group/participants`, `/api/group/subject`, `/api/group/invite`,
 `/api/group/leave`, `/api/media/purge`, `/api/history`, `/api/group/create`, `/api/webhook/test`.
@@ -701,9 +701,9 @@ injection away from sending. With read-only on there is no send tool to call.
 
 Two deliberate calls at the edges:
 
-- `get_group_invite_link` is blocked even though it usually only reads:
-  `reset=True` revokes the current link, and an invite link *is* group access
-  that can be leaked into a chat.
+- `get_group_invite_link` is blocked even though it only reads (its MCP
+  annotation says so): an invite link *is* group access that can be leaked into
+  a chat. Revoking the link is the separate `reset_group_invite_link`.
 - `request_history` / `/api/history` (on-demand backfill) is blocked: it asks
   the phone to push data and writes new rows into `messages.db`. Turn read-only
   off for the run if you need to backfill a chat.
@@ -763,6 +763,13 @@ WHATSAPP_DENY_TOOLS=delete_message,leave_group,manage_group_participants,purge_m
   not repeat this one: `/api/download` is a read endpoint and stays open there,
   like `/api/poll` and `/api/group/members`, so the MCP server is the only place
   it is enforced.
+- **`get_group_invite_link` also covers `reset_group_invite_link`.** Revoking the
+  link used to be its `reset` argument and is now a tool of its own; naming the
+  old tool in either list allows or denies both, so a list written before the
+  split keeps exactly its power. `reset_group_invite_link` on its own narrows
+  only the reset. The bridge decides `/api/group/invite` per request: with
+  `reset: true` it needs `reset_group_invite_link` allowed, without it
+  `get_group_invite_link`.
 
 The runtime webhook read is a deliberate sensitive-read exception on the bridge: `get_webhook` / `GET /api/webhook` obeys both tool lists while staying readable under `WHATSAPP_READ_ONLY`. `test_webhook` / `POST /api/webhook/test` obeys the lists and read-only, because it sends a synthetic event to the configured receiver. Neither can change or remove that destination.
 

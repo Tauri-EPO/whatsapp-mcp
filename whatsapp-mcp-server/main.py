@@ -262,6 +262,27 @@ MCP_VERSION = (os.getenv("WHATSAPP_MCP_VERSION") or "dev").strip()
 mcp = MediaResourceServer("whatsapp", version=MCP_VERSION)
 
 
+# MCP tool annotations (issue #851). Every tool declares all of them, so a client
+# or a connector directory never falls back to the spec defaults (which assume a
+# destructive, open-world tool). They are hints for the client only: what this
+# server refuses is decided by @mutating_tool and tool_policy.py, never by these.
+# tests/test_tool_annotations.py fails on a registered tool that lacks any.
+def _reads(title: str, *, open_world: bool) -> ToolAnnotations:
+    """A tool that changes nothing; open_world when it asks WhatsApp or another service."""
+    return ToolAnnotations(title=title, read_only_hint=True, open_world_hint=open_world)
+
+
+def _writes(title: str, *, destructive: bool, idempotent: bool, open_world: bool) -> ToolAnnotations:
+    """A tool that changes state, on WhatsApp or in local MCP-owned files (notes, exports)."""
+    return ToolAnnotations(
+        title=title,
+        read_only_hint=False,
+        destructive_hint=destructive,
+        idempotent_hint=idempotent,
+        open_world_hint=open_world,
+    )
+
+
 STATUS_DETAIL_ENV = "WHATSAPP_STATUS_DETAIL"
 
 
@@ -314,7 +335,7 @@ def _minimal_status(full: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get runtime webhook", open_world=False))
 @tool_errors
 def get_webhook() -> dict[str, Any]:
     """Inspect the existing runtime webhook without changing its destination.
@@ -332,7 +353,7 @@ def get_webhook() -> dict[str, Any]:
     return whatsapp.get_webhook(detail=_status_detail_allowed())
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Test runtime webhook", destructive=False, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def test_webhook() -> dict[str, Any]:
@@ -348,7 +369,7 @@ def test_webhook() -> dict[str, Any]:
     return whatsapp.test_webhook()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Bridge status", open_world=True))
 @tool_errors
 def bridge_status(detail: bool = False) -> dict[str, Any]:
     """Health of the WhatsApp bridge: is it reachable, paired and connected.
@@ -392,7 +413,7 @@ def bridge_status(detail: bool = False) -> dict[str, Any]:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Archive coverage", open_world=False))
 @tool_errors
 @untrusted_content
 def coverage(
@@ -491,7 +512,7 @@ def coverage(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Request older history", destructive=False, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def request_history(chat_jid: str, count: int = 50, before_message_id: str | None = None) -> dict[str, Any]:
@@ -544,7 +565,7 @@ def request_history(chat_jid: str, count: int = 50, before_message_id: str | Non
     return whatsapp_request_history(chat_jid, count, before_message_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Search contacts", open_world=False))
 @tool_errors
 @untrusted_content
 def search_contacts(query: str) -> list[dict[str, Any]]:
@@ -584,7 +605,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     return contacts
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get contact", open_world=False))
 @tool_errors
 @untrusted_content
 def get_contact(identifier: str) -> dict[str, Any]:
@@ -828,7 +849,7 @@ def _shape_chats(
     return shape_rows(rows, fields, omit_nulls, max_content_chars, known=known, content_key="last_message")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List messages", open_world=False))
 @tool_errors
 @untrusted_content
 def list_messages(
@@ -1045,7 +1066,7 @@ def list_messages(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Message statistics", open_world=False))
 @tool_errors
 @untrusted_content
 def message_stats(
@@ -1131,7 +1152,7 @@ def message_stats(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Export messages to a file", destructive=True, idempotent=True, open_world=False))
 @tool_errors
 @untrusted_content
 def export_messages(
@@ -1213,7 +1234,7 @@ def export_messages(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List unread chats", open_world=False))
 @tool_errors
 @untrusted_content
 def list_unread(
@@ -1312,7 +1333,7 @@ def list_unread(
     return unread
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List unanswered chats", open_world=False))
 @tool_errors
 @untrusted_content
 def list_unanswered(
@@ -1468,7 +1489,7 @@ def list_unanswered(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List chats", open_world=False))
 @tool_errors
 @untrusted_content
 def list_chats(
@@ -1557,7 +1578,7 @@ def list_chats(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get chat", open_world=False))
 @tool_errors
 @untrusted_content
 def get_chat(
@@ -1593,7 +1614,7 @@ def get_chat(
     return _shape_chats([chat], fields, omit_nulls, max_content_chars, known=(*CHAT_FIELDS, "group_settings"))[0]
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get direct chat by contact", open_world=False))
 @tool_errors
 @untrusted_content
 def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
@@ -1623,7 +1644,7 @@ def get_direct_chat_by_contact(contact_jid: str) -> dict[str, Any]:
     return chat
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get contact's chats", open_world=False))
 @tool_errors
 @untrusted_content
 def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
@@ -1658,7 +1679,7 @@ def get_contact_chats(contact_jid: str, limit: int = 20, page: int = 0, cursor: 
     return chats.to_dict()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get last interaction", open_world=False))
 @tool_errors
 @untrusted_content
 def get_last_interaction(contact_jid: str) -> dict[str, Any]:
@@ -1677,7 +1698,7 @@ def get_last_interaction(contact_jid: str) -> dict[str, Any]:
     return message
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get message context", open_world=False))
 @tool_errors
 @untrusted_content
 def get_message_context(
@@ -1733,7 +1754,7 @@ def get_message_context(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Send message", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def send_message(
@@ -1790,7 +1811,7 @@ def send_message(
     return {"success": success, "message": status_message, **sent}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Send reaction", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def send_reaction(
@@ -1821,7 +1842,7 @@ def send_reaction(
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List group members", open_world=True))
 @tool_errors
 @untrusted_content
 def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: str | None = None) -> dict[str, Any]:
@@ -1861,7 +1882,7 @@ def list_group_members(chat_jid: str, limit: int = 100, page: int = 0, cursor: s
     return whatsapp_get_group_members(chat_jid, limit=limit, page=page, cursor=cursor)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get message receipts", open_world=False))
 @tool_errors
 def get_message_receipts(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Get observed delivery/read/played receipts for a message this account sent.
@@ -1881,7 +1902,7 @@ def get_message_receipts(chat_jid: str, message_id: str) -> dict[str, Any]:
     return whatsapp.get_message_receipts(chat_jid, message_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Check business account", open_world=True))
 @tool_errors
 @untrusted_content
 def check_business(jid: str) -> dict[str, Any]:
@@ -1899,7 +1920,7 @@ def check_business(jid: str) -> dict[str, Any]:
     return clean_business(whatsapp.check_business(jid))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Create group", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def create_group(
@@ -1924,7 +1945,7 @@ def create_group(
     return whatsapp.create_group(name, participants, community, parent_jid)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List community subgroups", open_world=True))
 @tool_errors
 @untrusted_content
 def list_subgroups(chat_jid: str) -> dict[str, Any]:
@@ -1936,7 +1957,7 @@ def list_subgroups(chat_jid: str) -> dict[str, Any]:
     return whatsapp.list_subgroups(chat_jid)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Manage group participants", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def manage_group_participants(chat_jid: str, action: str, participants: list[str]) -> dict[str, Any]:
@@ -1961,7 +1982,7 @@ def manage_group_participants(chat_jid: str, action: str, participants: list[str
     return whatsapp_manage_group_participants(chat_jid, action, participants)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Update group name or description", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def update_group(chat_jid: str, name: str | None = None, description: str | None = None) -> dict[str, Any]:
@@ -1984,23 +2005,39 @@ def update_group(chat_jid: str, name: str | None = None, description: str | None
     return whatsapp_update_group(chat_jid, name=name, description=description)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get group invite link", open_world=True))
 @tool_errors
 @mutating_tool
-def get_group_invite_link(chat_jid: str, reset: bool = False) -> dict[str, Any]:
-    """Get the group's invite link (admin only). reset=True revokes the previous link first.
+def get_group_invite_link(chat_jid: str) -> dict[str, Any]:
+    """Get the group's current invite link (admin only). Changes nothing.
+
+    To revoke the link and create a new one, call reset_group_invite_link.
 
     Args:
         chat_jid: The group JID
-        reset: Generate a new link and invalidate the old one (default False)
 
     Returns:
         {"success": true, "link": "https://chat.whatsapp.com/..."}
     """
-    return whatsapp_get_group_invite_link(chat_jid, reset=reset)
+    return whatsapp_get_group_invite_link(chat_jid, reset=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Reset group invite link", destructive=True, idempotent=False, open_world=True))
+@tool_errors
+@mutating_tool
+def reset_group_invite_link(chat_jid: str) -> dict[str, Any]:
+    """Revoke the group's invite link and create a new one (admin only). The old link stops working.
+
+    Args:
+        chat_jid: The group JID
+
+    Returns:
+        {"success": true, "link": "https://chat.whatsapp.com/..."} — the new link
+    """
+    return whatsapp_get_group_invite_link(chat_jid, reset=True)
+
+
+@mcp.tool(annotations=_writes("Leave group", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def leave_group(chat_jid: str) -> dict[str, Any]:
@@ -2012,7 +2049,7 @@ def leave_group(chat_jid: str) -> dict[str, Any]:
     return whatsapp_leave_group(chat_jid)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List labels", open_world=False))
 @tool_errors
 @untrusted_content
 def list_labels(chat_jid: str | None = None, include_deleted: bool = False) -> dict[str, Any]:
@@ -2034,7 +2071,7 @@ def list_labels(chat_jid: str | None = None, include_deleted: bool = False) -> d
     return whatsapp_list_labels(chat_jid, include_deleted)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Label chat", destructive=False, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def label_chat(chat_jid: str, label: str, labeled: bool = True) -> dict[str, Any]:
@@ -2059,7 +2096,7 @@ def label_chat(chat_jid: str, label: str, labeled: bool = True) -> dict[str, Any
     return whatsapp_label_chat(chat_jid, label, labeled)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Archive chat", destructive=False, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
@@ -2085,7 +2122,7 @@ def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:
     return whatsapp_archive_chat(chat_jid, archived)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+@mcp.tool(annotations=_writes("Delete chat", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def delete_chat(chat_jid: str, delete_media: bool = False, confirm: bool = False) -> dict[str, Any]:
@@ -2112,7 +2149,7 @@ def delete_chat(chat_jid: str, delete_media: bool = False, confirm: bool = False
     return whatsapp_delete_chat(chat_jid, delete_media, confirm)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Block contact", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def block_contact(jid: str, blocked: bool = True) -> dict[str, Any]:
@@ -2132,7 +2169,7 @@ def block_contact(jid: str, blocked: bool = True) -> dict[str, Any]:
     return whatsapp_block_contact(jid, blocked)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get blocklist", open_world=True))
 @tool_errors
 def get_blocklist() -> dict[str, Any]:
     """List the contacts this account has blocked.
@@ -2144,7 +2181,7 @@ def get_blocklist() -> dict[str, Any]:
     return whatsapp_get_blocklist()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Send typing indicator", destructive=False, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
@@ -2160,7 +2197,7 @@ def send_typing(chat_jid: str, is_typing: bool = True) -> dict[str, Any]:
     return whatsapp_send_typing(chat_jid, is_typing)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get poll results", open_world=False))
 @tool_errors
 @untrusted_content
 def get_poll_results(chat_jid: str, message_id: str) -> dict[str, Any]:
@@ -2183,7 +2220,7 @@ def get_poll_results(chat_jid: str, message_id: str) -> dict[str, Any]:
     return whatsapp_get_poll_results(message_id, chat_jid)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Delete message", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -> dict[str, Any]:
@@ -2210,7 +2247,7 @@ def delete_message(chat_jid: str, message_id: str, for_everyone: bool = False) -
     return {"success": success, "message": status_message, "for_everyone": for_everyone}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructive_hint=True, idempotent_hint=False))
+@mcp.tool(annotations=_writes("Delete messages for me", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def delete_messages_for_me(chat_jid: str, message_ids: list[str], confirm: bool = False) -> dict[str, Any]:
@@ -2237,7 +2274,7 @@ def delete_messages_for_me(chat_jid: str, message_ids: list[str], confirm: bool 
     return whatsapp_delete_messages_for_me(chat_jid, message_ids, confirm)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Edit message", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def edit_message(chat_jid: str, message_id: str, text: str, dry_run: bool = False) -> dict[str, Any]:
@@ -2266,7 +2303,7 @@ def edit_message(chat_jid: str, message_id: str, text: str, dry_run: bool = Fals
     return whatsapp_edit_message(chat_jid, message_id, text, dry_run=dry_run)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Forward message", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[str, Any]:
@@ -2300,7 +2337,7 @@ def forward_message(chat_jid: str, message_id: str, to_chat_jid: str) -> dict[st
     return whatsapp_forward_message(chat_jid, message_id, to_chat_jid)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Mark messages read", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def mark_messages_read(
@@ -2357,7 +2394,7 @@ def mark_messages_read(
     return whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp, up_to_timestamp)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Send file", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def send_file(
@@ -2461,7 +2498,7 @@ def send_file(
     return {"success": success, "message": status_message, **sent}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Send voice message", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def send_audio_message(
@@ -2520,7 +2557,7 @@ def send_audio_message(
     return {"success": success, "message": status_message, **sent}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("List media", open_world=False))
 @tool_errors
 @untrusted_content
 def list_media(
@@ -2603,7 +2640,7 @@ def list_media(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Media statistics", open_world=False))
 @tool_errors
 @untrusted_content
 def get_media_stats(chat_jid: str | list[str] = "", exclude_chat_jid: str | list[str] = "") -> dict[str, Any]:
@@ -2626,7 +2663,7 @@ def get_media_stats(chat_jid: str | list[str] = "", exclude_chat_jid: str | list
     return media_stats(_optional_chats(chat_jid), _optional_chats(exclude_chat_jid))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Annotate media", destructive=True, idempotent=True, open_world=False))
 @tool_errors
 def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
     """Record what a media file is, after you interpreted it: summary, tags, transcript, keep.
@@ -2659,7 +2696,7 @@ def annotate_media(sha256: str, key: str, value: str = "") -> dict[str, Any]:
     return notes_annotate_media(sha256, key, value)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get media notes", open_world=False))
 @tool_errors
 @untrusted_content
 def get_media_notes(sha256: str) -> dict[str, Any]:
@@ -2676,7 +2713,7 @@ def get_media_notes(sha256: str) -> dict[str, Any]:
     return notes_get_media_notes(sha256)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Clear media refusal", destructive=True, idempotent=True, open_world=False))
 @tool_errors
 def clear_media_refusal(chat_jid: str, message_id: str) -> dict[str, Any]:
     """Remove a message's recorded media_refused error so ingest may try it again.
@@ -2691,7 +2728,7 @@ def clear_media_refusal(chat_jid: str, message_id: str) -> dict[str, Any]:
     return notes_clear_media_refusal(chat_jid, message_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Search media notes", open_world=False))
 @tool_errors
 @untrusted_content
 def search_media_notes(query: str, key: str = "", limit: int = 50) -> list[dict[str, Any]]:
@@ -2709,7 +2746,7 @@ def search_media_notes(query: str, key: str = "", limit: int = 50) -> list[dict[
     return notes_search_media_notes(query, key or None, limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Annotate", destructive=True, idempotent=False, open_world=False))
 @tool_errors
 @untrusted_content
 def annotate(
@@ -2775,7 +2812,7 @@ def annotate(
     return notes_annotate(target_type, target_id, key, value, mode, if_unchanged_since or None)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Get notes", open_world=False))
 @tool_errors
 @untrusted_content
 def get_notes(target_type: str, target_id: str, include_history: bool = False) -> dict[str, Any]:
@@ -2801,7 +2838,7 @@ def get_notes(target_type: str, target_id: str, include_history: bool = False) -
     return notes_get_notes(target_type, target_id, include_history)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Search notes", open_world=False))
 @tool_errors
 @untrusted_content
 def search_notes(query: str, key: str = "", target_type: str = "", limit: int = 50) -> list[dict[str, Any]]:
@@ -2824,7 +2861,7 @@ def search_notes(query: str, key: str = "", target_type: str = "", limit: int = 
     return notes_search_notes(query, key or None, target_type or None, limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Compact note", destructive=True, idempotent=False, open_world=False))
 @tool_errors
 @untrusted_content
 def compact(target_type: str, target_id: str, key: str, value: str) -> dict[str, Any]:
@@ -2848,7 +2885,7 @@ def compact(target_type: str, target_id: str, key: str, value: str) -> dict[str,
     return notes_compact(target_type, target_id, key, value)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Mark chat handled", destructive=True, idempotent=False, open_world=False))
 @tool_errors
 def mark_handled(chat_jid: str, note: str = "") -> dict[str, Any]:
     """Mark a conversation as dealt with, so list_unanswered stops repeating it.
@@ -2877,7 +2914,7 @@ def mark_handled(chat_jid: str, note: str = "") -> dict[str, Any]:
     return triage_mark_handled(chat_jid, note)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Snooze chat", destructive=True, idempotent=True, open_world=False))
 @tool_errors
 def snooze(chat_jid: str, until: str) -> dict[str, Any]:
     """Hide a conversation from list_unanswered until a date, then let it come back.
@@ -2905,7 +2942,7 @@ def snooze(chat_jid: str, until: str) -> dict[str, Any]:
     return triage_snooze(chat_jid, until)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Purge cached media", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def purge_media(
@@ -2981,7 +3018,7 @@ def purge_media(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Download media", open_world=True))
 @tool_errors
 @untrusted_content
 def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
@@ -3050,7 +3087,7 @@ def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
     raise ToolError("internal", "Bridge reported success without a file path")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_reads("Read media", open_world=True))
 @content_tool
 @tool_errors
 @untrusted_content
@@ -3235,7 +3272,7 @@ def _audio_to_transcribe(chat_jid: str, message_id: str) -> str:
     return downloaded
 
 
-@mcp.tool()
+@mcp.tool(annotations=_writes("Transcribe audio", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @untrusted_content
 def transcribe_audio(

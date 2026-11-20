@@ -25,7 +25,10 @@ package main
 // an allow-list must not silently widen it.
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -58,7 +61,7 @@ var endpointTools = map[string][]string{
 	"/api/forward":            {"forward_message"},
 	"/api/group/participants": {"manage_group_participants"},
 	"/api/group/subject":      {"update_group"},
-	"/api/group/invite":       {"get_group_invite_link"},
+	"/api/group/invite":       {"get_group_invite_link", "reset_group_invite_link"},
 	"/api/group/leave":        {"leave_group"},
 	"/api/media/purge":        {"purge_media"},
 	"/api/history":            {"request_history"},
@@ -108,6 +111,12 @@ var unenforcedTools = []string{
 	"snooze",
 	"transcribe_audio",
 }
+
+// toolImpliedBy maps a tool split off another one to the older name. The older
+// name in either list also allows or denies the split-off tool, so a list written
+// before the split keeps exactly its power (issue #851). Mirrors IMPLIED_BY in
+// whatsapp-mcp-server/tool_policy.py.
+var toolImpliedBy = map[string]string{"reset_group_invite_link": "get_group_invite_link"}
 
 // toolPolicy is the parsed pair of lists. The zero value allows everything.
 type toolPolicy struct {
@@ -183,10 +192,31 @@ func (p toolPolicy) restricted() bool {
 
 // allowsTool applies deny-then-allow to one tool name.
 func (p toolPolicy) allowsTool(name string) bool {
-	if p.deny[name] {
+	older := toolImpliedBy[name]
+	if p.deny[name] || p.deny[older] {
 		return false
 	}
-	return len(p.allow) == 0 || p.allow[name]
+	return len(p.allow) == 0 || p.allow[name] || p.allow[older]
+}
+
+// inviteTool is the tool a /api/group/invite request is: the endpoint serves
+// both and its reset flag decides. The body is decoded as the handler decodes it
+// (groupRequest, first JSON value) and put back; a body the handler would refuse
+// counts as the read, which the handler then rejects anyway.
+func inviteTool(r *http.Request) (string, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > 1<<20 {
+		return "", fmt.Errorf("request body over 1 MiB")
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var req groupRequest
+	if json.NewDecoder(bytes.NewReader(body)).Decode(&req) == nil && req.Reset {
+		return "reset_group_invite_link", nil
+	}
+	return "get_group_invite_link", nil
 }
 
 // refusal returns the 403 message for a path, or "" when the path may proceed.
@@ -210,9 +240,16 @@ func (p toolPolicy) refusal(path string) string {
 		if p.allowLabel != "" {
 			env = p.allowLabel + " does not list it"
 		}
-		if p.deny[name] {
+		denied := name
+		if !p.deny[name] {
+			denied = toolImpliedBy[name]
+		}
+		if p.deny[denied] {
 			env = denyToolsEnv + " lists it"
-			if label := p.denyLabels[name]; label != "" {
+			if denied != name {
+				env = denyToolsEnv + " lists " + denied
+			}
+			if label := p.denyLabels[denied]; label != "" {
 				env = label
 			}
 		}
@@ -232,6 +269,17 @@ func (p toolPolicy) guard(h http.HandlerFunc) http.HandlerFunc {
 		if msg := p.refusal(r.URL.Path); msg != "" {
 			writeError(w, http.StatusForbidden, msg)
 			return
+		}
+		if r.URL.Path == "/api/group/invite" {
+			tool, err := inviteTool(r)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+				return
+			}
+			if !p.allowsTool(tool) {
+				writeError(w, http.StatusForbidden, "/api/group/invite is disabled for this request: "+tool+" is blocked by "+allowToolsEnv+" / "+denyToolsEnv)
+				return
+			}
 		}
 		h(w, r)
 	}
