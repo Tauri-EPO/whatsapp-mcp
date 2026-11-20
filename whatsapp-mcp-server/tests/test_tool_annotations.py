@@ -129,6 +129,18 @@ def test_sends_are_destructive_and_open_world():
         assert (ann.read_only_hint, ann.destructive_hint, ann.open_world_hint) == (False, True, True), name
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "export_messages",  # No out_path: each later call can create another dated file.
+        "snooze",  # Repeated values still add note versions and refresh the triage anchor.
+        "transcribe_audio",  # force=True repeats metered inference and transcript writes.
+    ],
+)
+def test_repeatable_writes_do_not_claim_idempotency(name):
+    assert _annotations()[name].idempotent_hint is False
+
+
 def test_annotations_reach_the_wire_in_camel_case():
     wire = _annotations()["reset_group_invite_link"].model_dump(by_alias=True, exclude_none=True)
     assert wire == {

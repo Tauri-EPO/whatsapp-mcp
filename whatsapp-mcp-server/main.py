@@ -1152,7 +1152,7 @@ def message_stats(
     )
 
 
-@mcp.tool(annotations=_writes("Export messages to a file", destructive=True, idempotent=True, open_world=False))
+@mcp.tool(annotations=_writes("Export messages to a file", destructive=True, idempotent=False, open_world=False))
 @tool_errors
 @untrusted_content
 def export_messages(
@@ -2914,7 +2914,7 @@ def mark_handled(chat_jid: str, note: str = "") -> dict[str, Any]:
     return triage_mark_handled(chat_jid, note)
 
 
-@mcp.tool(annotations=_writes("Snooze chat", destructive=True, idempotent=True, open_world=False))
+@mcp.tool(annotations=_writes("Snooze chat", destructive=True, idempotent=False, open_world=False))
 @tool_errors
 def snooze(chat_jid: str, until: str) -> dict[str, Any]:
     """Hide a conversation from list_unanswered until a date, then let it come back.
@@ -3272,7 +3272,7 @@ def _audio_to_transcribe(chat_jid: str, message_id: str) -> str:
     return downloaded
 
 
-@mcp.tool(annotations=_writes("Transcribe audio", destructive=True, idempotent=True, open_world=True))
+@mcp.tool(annotations=_writes("Transcribe audio", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @untrusted_content
 def transcribe_audio(
