@@ -116,6 +116,7 @@ def test_local_writes_are_not_annotated_read_only():
         "mark_handled",
         "snooze",
         "export_messages",
+        "download_media",  # Returns a persisted path callers can depend on, not just bytes.
         "transcribe_audio",
     ):
         assert annotations[name].read_only_hint is False, name

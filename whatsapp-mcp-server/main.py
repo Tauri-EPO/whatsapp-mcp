@@ -3018,7 +3018,7 @@ def purge_media(
     )
 
 
-@mcp.tool(annotations=_reads("Download media", open_world=True))
+@mcp.tool(annotations=_writes("Download media", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @untrusted_content
 def download_media(chat_jid: str, message_id: str) -> dict[str, Any]:
