@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.14.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.13.0...v2.14.0) (2026-11-20)
+
+
+### Features
+
+* MCP annotations on every tool; split group invite link read and reset ([#854](https://github.com/Tauri-EPO/whatsapp-mcp/issues/854)) ([5b6bde0](https://github.com/Tauri-EPO/whatsapp-mcp/commit/5b6bde08cf85438b06479bf47d512d55325752a0))
+
 ## [2.13.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.12.0...v2.13.0) (2026-11-19)
 
 
