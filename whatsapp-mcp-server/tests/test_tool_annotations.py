@@ -5,8 +5,8 @@ read-only / destructive hints, and a client without them falls back to the spec
 defaults (destructive, open world). The check walks the tools the server really
 registered, so a tool added without annotations fails here, and it stays in step
 with the enforced policy: an annotation may be more cautious than
-``@mutating_tool``, never less. The values matter too: every ``delete*``,
-``leave*`` and ``block*`` tool must stay a destructive write (#856).
+``@mutating_tool``, never less. The ``delete_*``, ``leave_*`` and ``block_*``
+tools and the other destructive tools named below must stay destructive writes (#856).
 
 The second half covers the split of ``get_group_invite_link``: the read keeps the
 old name and is annotated read-only, revoking the link is
@@ -108,34 +108,56 @@ def test_mutating_tools_are_never_annotated_read_only():
 
 # Tools that delete or cut off access, picked by name from the live registry so a
 # new delete_*/leave_*/block_* tool is covered without editing this file (#856).
-DESTRUCTIVE_PREFIXES = ("delete", "leave", "block")
-# Matched on 2026-11-20: block_contact, delete_chat, delete_message,
-# delete_messages_for_me, leave_group. Fewer means the pattern broke, not that
-# the tools went away.
-MIN_DESTRUCTIVE_PREFIX_TOOLS = 5
+DESTRUCTIVE_PREFIXES = ("delete_", "leave_", "block_")
+# Pin the current matches so a new tool cannot mask a lost match. Update this
+# set in the same PR when deliberately removing or renaming a pinned tool.
+PINNED_DESTRUCTIVE_PREFIX_TOOLS = {
+    "block_contact",
+    "delete_chat",
+    "delete_message",
+    "delete_messages_for_me",
+    "leave_group",
+}
+# These tools also remove saved state or can revoke access.
+OTHER_DESTRUCTIVE_TOOLS = {
+    "clear_media_refusal",
+    "manage_group_participants",
+    "purge_media",
+    "reset_group_invite_link",
+}
 
 
-def destructive_prefix_tools(annotations: dict[str, ToolAnnotations]) -> list[str]:
-    return sorted(name for name in annotations if name.startswith(DESTRUCTIVE_PREFIXES))
+def destructive_prefix_tools() -> set[str]:
+    return {name for name in registered_tool_names(main.mcp) if name.startswith(DESTRUCTIVE_PREFIXES)}
 
 
 def test_the_destructive_prefixes_match_real_tools():
-    assert len(destructive_prefix_tools(_annotations())) >= MIN_DESTRUCTIVE_PREFIX_TOOLS
+    missing = PINNED_DESTRUCTIVE_PREFIX_TOOLS - destructive_prefix_tools()
+    assert not missing, f"pinned tools missing from the prefix matches: {sorted(missing)}"
 
 
 def test_delete_leave_and_block_tools_are_destructive_writes():
+    missing = OTHER_DESTRUCTIVE_TOOLS - registered_tool_names(main.mcp)
+    assert not missing, f"unregistered destructive tools: {sorted(missing)}"
+
     annotations = _annotations()
-    wrong = {
-        name: (annotations[name].read_only_hint, annotations[name].destructive_hint)
-        for name in destructive_prefix_tools(annotations)
-        if (annotations[name].read_only_hint, annotations[name].destructive_hint) != (False, True)
-    }
+    wrong = {}
+    for name in sorted(destructive_prefix_tools() | OTHER_DESTRUCTIVE_TOOLS):
+        ann = annotations.get(name)
+        hints = (ann.read_only_hint, ann.destructive_hint) if ann is not None else None
+        if hints != (False, True):
+            wrong[name] = hints
     assert wrong == {}, "expected readOnlyHint=False, destructiveHint=True"
 
 
 def test_the_read_only_exceptions_never_cover_a_destructive_tool():
-    """READ_ONLY_DESPITE_POLICY is for reads the policy gates, never for deletes."""
-    assert not [name for name in READ_ONLY_DESPITE_POLICY if name.startswith(DESTRUCTIVE_PREFIXES)]
+    """Report destructive read-only exceptions directly."""
+    wrong = sorted(
+        name
+        for name in READ_ONLY_DESPITE_POLICY
+        if name.startswith(DESTRUCTIVE_PREFIXES) or name in OTHER_DESTRUCTIVE_TOOLS
+    )
+    assert not wrong, f"destructive tools listed as read-only exceptions: {wrong}"
 
 
 def test_local_writes_are_not_annotated_read_only():
