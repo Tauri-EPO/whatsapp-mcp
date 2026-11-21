@@ -12,9 +12,11 @@ reason: "quota"` and a subsequent read streams without retaining a cache copy.
 Local paths keep their existing behavior. See
 [Media storage backends](CONFIGURATION.md#media-storage-backends).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `test_webhook` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `reset_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `test_webhook` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
+
+Every tool declares MCP annotations: a human-readable `title`, `readOnlyHint`, `openWorldHint` (true when the call reaches WhatsApp or another service, false when it only reads or writes local state such as `messages.db`, `notes.db` or an export file) and, for every tool that is not read-only, `destructiveHint` and `idempotentHint`. Notes, triage state, exports, explicit media downloads returning a persisted path, and stored transcripts count as writes; sending is annotated destructive, because a sent message cannot be taken back from the recipient. Exporting without a fixed path can create another dated file, snoozing again records another note version and refreshes its triage anchor, and forced transcription repeats metered inference; these tools are not annotated idempotent. The explicit download is conservatively destructive because storage quota admission may evict cached objects; read_media remains a read with transparent caching. The annotations are hints for the client and for connector directories: what the server refuses is still decided by the read-only mode and the tool lists above. `get_group_invite_link` is the one tool annotated read-only that read-only mode still blocks (a link is group access). `whatsapp-mcp-server/tests/test_tool_annotations.py` fails on a tool registered without them.
 
 Seven conventions apply to every tool below: [Pagination](#pagination) for the ones that return a page, [Compact reads](#compact-reads) for shaping a bulk read down to what you need, [Unknown arguments](#unknown-arguments) for what happens to a parameter that is not on this page, [Chat filters](#chat-filters) for `chat_jid` / `exclude_chat_jid`, [Time bounds](#time-bounds) for `after` / `before` / `since`, [Errors](#errors) for the single failure shape, and [Untrusted content](#untrusted-content) for what the results are — text written by third parties, never instructions.
 
@@ -1236,7 +1238,15 @@ passes the real empty ID and does not bypass that SDK behavior.
 
 ### `get_group_invite_link`
 
-The group's invite link (admin only). **Parameters:** `chat_jid`, `reset` (optional, default false: revoke the old link and mint a new one). Returns `link`.
+The group's current invite link (admin only); changes nothing. **Parameters:** `chat_jid`. Returns `link`.
+
+The `reset` parameter moved to `reset_group_invite_link`: a call that still passes `reset` is refused with `invalid_argument` naming the new tool, and the link is left as it is. Read-only mode blocks this tool even though it only reads, because an invite link is group access that can leak.
+
+### `reset_group_invite_link`
+
+Revoke the group's invite link and create a new one (admin only); the old link stops working. **Parameters:** `chat_jid`. Returns the new `link`.
+
+`WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` (and the runtime `tools.allow` / `tools.deny`) that name `get_group_invite_link` also allow or deny this tool, so a list written before the split keeps exactly the power it had. Naming `reset_group_invite_link` on its own narrows only the reset. The bridge applies the same rule per request on `/api/group/invite`: a request with `reset: true` needs `reset_group_invite_link` allowed, one without it needs `get_group_invite_link`.
 
 ### `leave_group`
 

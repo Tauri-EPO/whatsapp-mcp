@@ -131,6 +131,7 @@ EXPECTED_TRUSTED = {
     "manage_group_participants",
     "update_group",
     "get_group_invite_link",
+    "reset_group_invite_link",
     "leave_group",
 }
 
