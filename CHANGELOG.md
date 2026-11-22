@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.14.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.14.0...v2.14.1) (2026-11-21)
+
+
+### Dependencies
+
+* bump pypdf from 7.0.0 to 7.1.0 in /whatsapp-mcp-server in the pip-version-updates group ([#852](https://github.com/Tauri-EPO/whatsapp-mcp/issues/852)) ([cc905f6](https://github.com/Tauri-EPO/whatsapp-mcp/commit/cc905f6cb7c9bbccc3d40c8ff1a3711ba8799535))
+
 ## [2.14.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.13.0...v2.14.0) (2026-11-20)
 
 
