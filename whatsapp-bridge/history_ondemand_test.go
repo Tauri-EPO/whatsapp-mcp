@@ -78,6 +78,7 @@ func TestHistoryRepairRequest(t *testing.T) {
 				{ID: "OTHER", ChatJID: other, Timestamp: ts},
 			} {
 				msg.Content = "hello"
+				seedChats(t, store, msg.ChatJID)
 				if err := store.StoreMessage(msg); err != nil {
 					t.Fatal(err)
 				}

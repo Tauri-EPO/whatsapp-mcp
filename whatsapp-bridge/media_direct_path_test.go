@@ -542,6 +542,7 @@ func TestHistorySyncRepairsMissingDirectPathWithoutReplacingExisting(t *testing.
 			ts := time.Now().Add(-time.Hour)
 			legacy := fixtureDocument()
 			legacy.DirectPath = nil
+			seedChats(t, ms, phonePN.String())
 			if err := persistMessage(ms, "REPAIR1", phonePN.String(), phonePN.String(), ts, false,
 				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, "REPAIR1"), true, b.Log); err != nil {
 				t.Fatal(err)
@@ -681,6 +682,7 @@ func TestHistoryRepairLIDReplayDownload(t *testing.T) {
 			if tc.complete {
 				legacy.DirectPath = proto.String("/o1/v/PRESERVED.enc?oe=7FFFFFFF")
 			}
+			seedChats(t, ms, phoneLID.String())
 			if err := persistMessage(ms, "REPAIR1", phoneLID.String(), phoneLID.String(), ts, false,
 				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, "REPAIR1"), true, b.Log); err != nil {
 				t.Fatal(err)
@@ -718,6 +720,7 @@ func TestHistoryRepairLIDReplayDownload(t *testing.T) {
 				}
 			}
 			const other = "5511888888888@s.whatsapp.net"
+			seedChats(t, ms, other)
 			if err := persistMessage(ms, "REPAIR1", other, other, ts, false,
 				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, "REPAIR1"), true, b.Log); err != nil {
 				t.Fatal(err)
@@ -865,6 +868,7 @@ func TestHistorySyncRepairsIncompleteMediaWithAnExistingPath(t *testing.T) {
 			case "enc_sha256":
 				partial.FileEncSHA256 = nil
 			}
+			seedChats(t, ms, phonePN.String())
 			if err := persistMessage(ms, "PARTIAL1", phonePN.String(), phonePN.String(), ts, false,
 				extractMessage(&waE2E.Message{DocumentMessage: partial}, ts, "PARTIAL1"), true, b.Log); err != nil {
 				t.Fatal(err)
@@ -925,6 +929,7 @@ func TestHistoryRepairAliasDiscoveryOncePerChat(t *testing.T) {
 	legacy := fixtureDocument()
 	legacy.DirectPath = nil
 	var rows []*waHistorySync.HistorySyncMsg
+	seedChats(t, ms, phoneLID.String())
 	for i := 0; i <= historyBatchMessages; i++ {
 		id := fmt.Sprintf("CHUNK%d", i)
 		if i == 0 || i == historyBatchMessages {
@@ -958,6 +963,7 @@ func TestHistoryRepairAliasDiscoveryScope(t *testing.T) {
 	ts := time.Now().Add(-time.Hour)
 	other := "999888777@lid"
 	for chat, id := range map[string]string{phoneLID.String(): "OTHER1", other: "TARGET1"} {
+		seedChats(t, ms, chat)
 		if err := persistMessage(ms, id, chat, chat, ts, false,
 			extractMessage(&waE2E.Message{DocumentMessage: fixtureDocument()}, ts, id), false, testLogger()); err != nil {
 			t.Fatal(err)

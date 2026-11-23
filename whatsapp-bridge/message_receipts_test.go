@@ -20,6 +20,7 @@ func TestPeerReceiptsSurviveLIDMigration(t *testing.T) {
 	lid, pn := "100000000000001@lid", "5511999999999@s.whatsapp.net"
 	at := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 	for _, chat := range []string{lid, pn} {
+		seedChats(t, ms, chat)
 		if err := ms.StoreMessage(storedMessage{ID: "own", ChatJID: chat, Sender: "5511888888888", Content: "Alice", Timestamp: at, IsFromMe: true}); err != nil {
 			t.Fatal(err)
 		}
@@ -72,6 +73,7 @@ func TestPeerReceiptEventIsAtomic(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), ms, installRecordingLogger(t))
 	group := types.NewJID("120363000000000001", types.GroupServer)
 	ids := make([]types.MessageID, 512)
+	seedChats(t, ms, group.String())
 	tx, err := ms.db.Begin()
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +123,7 @@ func TestPeerReceiptsOwnMessageBatchAndIdentity(t *testing.T) {
 		{ID: "elsewhere", ChatJID: other.String(), Sender: pn.String(), Timestamp: at, IsFromMe: true},
 	} {
 		row.Content = "Alice"
+		seedChats(t, ms, row.ChatJID)
 		if err := ms.StoreMessage(row); err != nil {
 			t.Fatal(err)
 		}
@@ -169,6 +172,7 @@ func TestPeerReceiptLIDDirectChat(t *testing.T) {
 	pn := types.NewJID("5511999999999", types.DefaultUserServer)
 	lid := types.NewJID("100000000000001", types.HiddenUserServer)
 	at := time.Now()
+	seedChats(t, ms, pn.String())
 	if err := ms.StoreMessage(storedMessage{ID: "own", ChatJID: pn.String(), Sender: pn.String(), Content: "Alice", Timestamp: at, IsFromMe: true}); err != nil {
 		t.Fatal(err)
 	}

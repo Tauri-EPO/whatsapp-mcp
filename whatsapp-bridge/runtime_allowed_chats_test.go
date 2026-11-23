@@ -278,6 +278,7 @@ func TestRuntimeChatsRequestPinsTypedRegisteredAndForwardTargets(t *testing.T) {
 					}
 					return ask.ask(ctx, phones)
 				}
+				seedChats(t, b.Store, mgGroup)
 				if err := b.Store.StoreMessage(storedMessage{ID: "FORWARD1", ChatJID: mgGroup, Sender: phonePN.String(), Content: "fake text", Timestamp: time.Now()}); err != nil {
 					t.Fatal(err)
 				}

@@ -196,7 +196,7 @@ func openMessagesDB(path string) (*sql.DB, error) {
 }
 
 // openMessagesDBWithOptions is openMessagesDB with other DSN options; only
-// the test store uses it, to keep foreign keys off for its fixtures.
+// the test store uses it, to add synchronous(OFF).
 func openMessagesDBWithOptions(path, options string) (*sql.DB, error) {
 	base, err := sqlite.NewConnector(sqliteURI(path, options))
 	if err != nil {

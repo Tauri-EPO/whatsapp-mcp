@@ -24,6 +24,7 @@ func chatDeleteSeed(t *testing.T, ms *MessageStore, id, chat, mediaType string, 
 	if mediaType != "" {
 		msg.URL, msg.MediaKey, msg.FileSHA256, msg.FileEncSHA256, msg.FileLength = "u", []byte("k"), []byte("s"), []byte("e"), 1
 	}
+	seedChats(t, ms, chat)
 	if err := ms.StoreMessage(msg); err != nil {
 		t.Fatal(err)
 	}

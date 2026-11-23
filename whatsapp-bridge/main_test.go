@@ -90,16 +90,12 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 	// The production opener, on a file: every pooled connection sees the same
 	// database. Each `:memory:` connection used to be a separate, empty one, so
 	// code under test that took a second connection (a background worker) got
-	// "no such table" (#737, and main broken on arm64 by #818). Two options
-	// differ from production: foreign keys stay off, as they were on that
-	// store, because fixtures insert messages without their chat row; and
-	// synchronous(OFF), because a test never survives a power cut and an
-	// fsync per commit made each store ~20x slower to set up.
-	options := strings.Replace(messagesWriterOptions, "_pragma=foreign_keys(1)&", "", 1)
-	if options == messagesWriterOptions {
-		t.Fatal("messagesWriterOptions no longer enables foreign keys where the test store expects")
-	}
-	options += "&_pragma=synchronous(OFF)"
+	// "no such table" (#737, and main broken on arm64 by #818). One option
+	// differs from production: synchronous(OFF), because a test never survives
+	// a power cut and an fsync per commit made each store ~20x slower to set
+	// up. Foreign keys are on, as in production (#864): a message needs its
+	// chat row first.
+	options := messagesWriterOptions + "&_pragma=synchronous(OFF)"
 	db, err := openMessagesDBWithOptions(filepath.Join(t.TempDir(), "messages.db"), options)
 	if err != nil {
 		t.Fatal(err)
@@ -207,6 +203,18 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 		t.Fatal(err)
 	}
 	return &MessageStore{db: db}
+}
+
+// seedChats creates chat rows the way a live message does (EnsureChat), for
+// fixtures that store messages directly: messages.chat_jid is a foreign key,
+// enforced in the test store as in production (#864).
+func seedChats(t testing.TB, ms *MessageStore, jids ...string) {
+	t.Helper()
+	for _, jid := range jids {
+		if err := ms.EnsureChat(jid, ""); err != nil {
+			t.Fatalf("seed chat %s: %v", jid, err)
+		}
+	}
 }
 
 func TestOpenWhatsmeowContactsDB_MissingPathDoesNotCreateDB(t *testing.T) {
@@ -2316,6 +2324,7 @@ func TestHandleMessage_RevokeMarksTargetDeleted(t *testing.T) {
 	chatJID := phonePN.String()
 	targetID := "3A1234567890ABCDEF"
 
+	seedChats(t, ms, chatJID)
 	if _, err := ms.db.Exec(
 		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2369,6 +2378,7 @@ func TestHandleMessage_DuplicateRevokeKeepsEarliestDeletedAt(t *testing.T) {
 	chatJID := phonePN.String()
 	targetID := "3A1234567890ABCDEF"
 
+	seedChats(t, ms, chatJID)
 	if _, err := ms.db.Exec(
 		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2395,6 +2405,7 @@ func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
 	chatJID := phonePN.String()
 	targetID := "3A1234567890ABCDEF"
 
+	seedChats(t, ms, chatJID)
 	if _, err := ms.db.Exec(
 		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2807,6 +2818,7 @@ func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
 	chatJID := "120363012345678901@g.us"
 	sender := "15551234567"
 	msgID := "3AABCDEF01234567"
+	seedChats(t, ms, chatJID)
 	if _, err := ms.db.Exec(
 		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		 VALUES (?, ?, ?, 'hi', ?, 0)`,
@@ -2891,6 +2903,7 @@ func TestValidateInboundMarkRead(t *testing.T) {
 	ms := newTestMessageStore(t)
 	chat := "15551234567@s.whatsapp.net"
 	group := "120363012345678901@g.us"
+	seedChats(t, ms, chat, group)
 	if _, err := ms.db.Exec(`
 		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES
 			('in-dm', ?, '15551234567', 'hi', ?, 0),
@@ -2922,6 +2935,7 @@ func TestMaxMessageTimestamp(t *testing.T) {
 	chat := "15551234567@s.whatsapp.net"
 	early := time.Unix(1710000000, 0).UTC()
 	late := time.Unix(1710009999, 0).UTC()
+	seedChats(t, ms, chat)
 	if _, err := ms.db.Exec(`
 		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES
 			('a', ?, '15551234567', 'early', ?, 0),
@@ -2952,6 +2966,7 @@ func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 	chatJID := phonePN.String()
 	seededID := "PRE_EXISTING_MESSAGE"
 
+	seedChats(t, ms, chatJID)
 	if _, err := ms.db.Exec(
 		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -3141,6 +3156,7 @@ func TestExtractMentionedJIDs_ExtendedText(t *testing.T) {
 func TestGetMessageIsFromMe(t *testing.T) {
 	store := newTestMessageStore(t)
 	chatJID := "15551234567@s.whatsapp.net"
+	seedChats(t, store, chatJID)
 	if err := store.StoreMessage(storedMessage{
 		ID:         "outbound",
 		ChatJID:    chatJID,

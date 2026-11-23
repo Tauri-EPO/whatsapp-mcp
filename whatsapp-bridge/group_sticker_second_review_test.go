@@ -185,6 +185,7 @@ func TestSecondReviewCachedStickerPermanentErrors(t *testing.T) {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			b, _, _ := sendRecipientBridge(t, &mockLIDStore{}, registeredWithoutNinthDigit())
 			b.MediaStorage = secondReviewMediaStorage{fail: sentinel}
+			seedChats(t, b.Store, testGroupJID)
 			if _, err := b.Store.db.Exec(`INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,media_type,filename) VALUES ('CACHE',?,'100000000001','',?,0,'image','fake.webp')`, testGroupJID, dbTime(time.Now())); err != nil {
 				t.Fatal(err)
 			}
@@ -237,6 +238,7 @@ func TestSecondReviewStickerPreviewReadsHeaderOnly(t *testing.T) {
 func TestSecondReviewCachePreservesForwardSource(t *testing.T) {
 	b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 	b.MediaStorage = secondReviewMediaStorage{data: stickerFixture(false)}
+	seedChats(t, b.Store, testGroupJID)
 	if _, err := b.Store.db.Exec(`INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me,media_type,filename) VALUES ('CACHE',?,'100000000001','',?,0,'image','fake.webp')`, testGroupJID, dbTime(time.Now())); err != nil {
 		t.Fatal(err)
 	}

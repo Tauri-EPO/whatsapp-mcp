@@ -104,6 +104,7 @@ func TestArchiveMissingLIDTwinUsesOnlyStoredChat(t *testing.T) {
 		id, chat string
 		when     time.Time
 	}{{"LID-SOURCE", registeredLID.String(), ts}, {"LATER-PHONE", efChat, ts.Add(time.Hour)}} {
+		seedChats(t, b.Store, row.chat)
 		if err := b.Store.StoreMessage(storedMessage{
 			ID:         row.id,
 			ChatJID:    row.chat,
