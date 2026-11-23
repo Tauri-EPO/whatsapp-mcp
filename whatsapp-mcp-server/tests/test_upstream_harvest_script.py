@@ -17,6 +17,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -323,7 +324,11 @@ def test_without_gh_the_commits_are_listed_and_the_timestamp_stays(marked: Harve
     only_git = marked.root / "only-git"
     only_git.mkdir()
     wrapper = only_git / "git"
-    wrapper.write_text(f'#!/bin/sh\nexec "{Path(GIT).as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
+    # Git for Windows' own fetch needs its runtime directories on PATH, or
+    # `git fetch` segfaults (issue #859). They go on git's PATH only, inside
+    # the wrapper: the script under test still sees only-git.
+    git_path = 'PATH="/mingw64/bin:/usr/bin:$PATH" ' if sys.platform == "win32" else ""
+    wrapper.write_text(f'#!/bin/sh\n{git_path}exec "{Path(GIT).as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     late = marked.commit(marked.up, "whatsapp-bridge/late.go", "up: later")
 

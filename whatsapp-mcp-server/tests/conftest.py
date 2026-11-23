@@ -50,6 +50,30 @@ FAMILY = "120363000000000001@g.us"
 DECOY = "15511999999999@s.whatsapp.net"
 CARLA = "5521777777777@s.whatsapp.net"
 
+# The bridge's default store, in the source tree. The MCP server's default
+# messages.db path points here, so a test that opens notes.db (or any store
+# file) without its own path writes into the checkout (issue #863).
+SOURCE_STORE = Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "store"
+
+
+@pytest.fixture(autouse=True)
+def _no_source_tree_store():
+    """A test that creates the source tree's store fails, naming itself.
+
+    A checkout that already has a store there (a bridge run from the source
+    tree) is left alone: nothing is deleted, and only new files would show.
+    """
+    before = set(SOURCE_STORE.iterdir()) if SOURCE_STORE.is_dir() else None
+    yield
+    after = set(SOURCE_STORE.iterdir()) if SOURCE_STORE.is_dir() else None
+    if after is not None and after != before:
+        created = sorted(p.name for p in after - (before or set()))
+        pytest.fail(
+            f"this test wrote {created} into {SOURCE_STORE}: point whatsapp.MESSAGES_DB_PATH "
+            "at tmp_path (monkeypatch, or the paired_store / auth_runtime_store fixtures)",
+            pytrace=False,
+        )
+
 
 @pytest.fixture(autouse=True)
 def _no_ambient_whisper(monkeypatch):

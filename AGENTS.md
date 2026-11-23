@@ -608,7 +608,7 @@ Each rule here is a mistake agents made in this repository more than once. A rul
 | Timestamps in `messages.db` use the one canonical spelling | `canonicalTimeConnector` (`store_time.go`) renders every bound `time.Time`; `TestMessagesDBIsOpenedOnlyThroughOpenMessagesDB` (`store_pool_test.go`) refuses another writer handle; `TestBoundTimeIsStoredInCanonicalSpelling` |
 | The test message store behaves like production (one database for every pooled connection, bounded pool, canonical bound times; only foreign keys stay off for the fixtures) | `newTestMessageStore` opens through `openMessagesDB`; `TestTestMessageStoreConnectionsShareOneDatabase` |
 | Every `sql.Open` / `sql.OpenDB` gets a pool bound | `TestEverySQLOpenIsFollowedByAPoolBound` (`store_pool_test.go`) |
-| Tests never write into the source tree's `store/` | `testStoreDir` / `requireTemporaryStore` (`test_store_guard_test.go`) |
+| Tests never write into the source tree's `store/` | Go: `testStoreDir` / `requireTemporaryStore` (`test_store_guard_test.go`); Python: the autouse `_no_source_tree_store` fixture (`tests/conftest.py`) fails the test that wrote there |
 | A new env var is documented in its four places | `tests/test_env_docs.py` |
 | A new top-level module is in the §3 tree (and, for Python, in `py-modules`) | `tests/test_agents_file_tree.py` |
 | Public files carry fake identifiers only | `tests/test_fake_identifiers.py` |

@@ -93,6 +93,14 @@ jobs:
           cache-dependency-path: whatsapp-bridge/go.sum
       - name: Build, vet, test
         timeout-minutes: 23
+        # The test message store is a WAL SQLite file under t.TempDir() (#860):
+        # TMPDIR on /dev/shm keeps those commits in memory, GOTMPDIR keeps the
+        # go command's work files and test binaries on disk (/dev/shm can be
+        # mounted noexec). /dev/shm itself, not a subdirectory: a temp dir name
+        # is up to ~80 bytes and the socket tests' paths must stay under 108.
+        env:
+          TMPDIR: /dev/shm
+          GOTMPDIR: ${{ runner.temp }}
         run: |
           cd whatsapp-bridge
           timeout --kill-after=5s 120s go build -v ./...
@@ -116,6 +124,10 @@ jobs:
         # is CGO_ENABLED=0, but -race needs cgo and the amd64 runner has it
         # (issue #351). The suite is one package and takes about nine minutes
         # under -race, so go test's default ten-minute timeout no longer fits.
+        # Test scratch in memory, as in "Build, vet, test".
+        env:
+          TMPDIR: /dev/shm
+          GOTMPDIR: ${{ runner.temp }}
         run: |
           cd whatsapp-bridge
           go test -race -timeout 40m ./...
