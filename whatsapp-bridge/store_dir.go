@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"modernc.org/sqlite"
 )
 
 const storeDirEnv = "WHATSAPP_STORE_DIR"
@@ -178,6 +180,22 @@ const (
 func boundPool(db *sql.DB, conns int) {
 	db.SetMaxOpenConns(conns)
 	db.SetMaxIdleConns(conns)
+}
+
+// openMessagesDB is the one way to open messages.db for writing, in
+// production and in tests (newTestMessageStore): the bridge's DSN options,
+// the bounded pool and canonicalTimeConnector, so a bound time.Time is stored
+// in dbTime's spelling whichever handle wrote it.
+func openMessagesDB(path string) *sql.DB {
+	return openMessagesDBWithOptions(path, messagesWriterOptions)
+}
+
+// openMessagesDBWithOptions is openMessagesDB with other DSN options; only
+// the test store uses it, to keep foreign keys off for its fixtures.
+func openMessagesDBWithOptions(path, options string) *sql.DB {
+	db := sql.OpenDB(canonicalTimeConnector{dsn: sqliteURI(path, options), driver: &sqlite.Driver{}})
+	boundPool(db, messagesPoolConns)
+	return db
 }
 
 // openSessionDB opens whatsmeow's session database (whatsapp.db) with its pool

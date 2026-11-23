@@ -15,6 +15,7 @@ Read top to bottom once; afterwards jump to the section you need.
 9. [Where to make changes](#9-where-to-make-changes)
 10. [Persona](#10-persona-for-ai-agents)
 11. [Issues](#11-issues)
+12. [Rules and what enforces them](#12-rules-and-what-enforces-them)
 
 ---
 
@@ -136,10 +137,10 @@ whatsapp-mcp/
 │   ├── store.go                # MessageStore: schema, migrations, message/chat/call queries
 │   ├── umask_unix.go           # startup-only POSIX owner-only creation mask
 │   ├── umask_other.go          # creation-mask no-op on non-POSIX systems
-│   ├── store_dir.go            # storeDir/storePath: WHATSAPP_STORE_DIR resolution; DSN options and connection-pool bounds (boundPool)
+│   ├── store_dir.go            # storeDir/storePath: WHATSAPP_STORE_DIR resolution; DSN options, connection-pool bounds (boundPool) and openMessagesDB, the one messages.db writer handle
 │   ├── store_batch.go          # atomic live-message writes and bounded history-sync transactions
 │   ├── migration_markers.go   # independent named markers for data rewrites
-│   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling + its migration
+│   ├── store_time.go           # dbTime/parseDBTime: the one UTC timestamp spelling, the connector that applies it to bound times, + its migration
 │   ├── mentions.go             # messages.mentions: who a message addressed + the backfill from old text
 │   ├── sender_namespace.go     # messages.sender_server: which namespace a stored sender is in + its backfill
 │   ├── contact_names.go        # batched local-only contact names and phone/LID alternates
@@ -308,9 +309,13 @@ The MCP server is a real package (issue #409): `pyproject.toml` declares `[build
 **Windows without a Go toolchain** (the primary dev box): build, test and lint the bridge inside Docker, mounting the module cache. From Git Bash with `MSYS_NO_PATHCONV=1`:
 
 ```bash
-docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
+docker run --rm --tmpfs /tmp:exec,size=4g -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
   sh -c 'go vet ./... && go test -timeout 30m ./...'
+# --tmpfs /tmp: the test message store is a WAL SQLite file under t.TempDir(),
+# like production. On Docker Desktop's overlay filesystem every WAL commit
+# costs milliseconds; on tmpfs the whole plain suite took 3 min 16 s
+# (2026-11-23), against 620-811 s before the test store moved to a file.
 # -timeout 30m: the one package outgrew Go's 10m default on this box. Measured
 # 2026-11-10/11 under Docker Desktop with other lanes running: 620 s, 787 s and
 # 811 s for the plain suite, with no test stuck (issue #809). A run that still
@@ -325,7 +330,7 @@ docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/p
 # One suite takes 25-35 minutes here under load
 # (1463-2053 s measured); three repeats get 120m. For a single pass use
 # -race -count=1 -timeout 45m.
-docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
+docker run --rm --tmpfs /tmp:exec,size=4g -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
   -v wamcp-gobuild:/root/.cache/go-build -w /src golang:1.27-alpine \
   sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 120m ./...'
 docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/pkg/mod" \
@@ -345,9 +350,9 @@ A worktree created before that attribute still holds CRLF `.go` files and gets e
 ```bash
 S=mylane
 V="-v wamcp-gomod-$S:/go/pkg/mod -v wamcp-gobuild-$S:/root/.cache/go-build"
-docker run --rm -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
+docker run --rm --tmpfs /tmp:exec,size=4g -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
   sh -c 'go vet ./... && go test -timeout 30m ./...'
-docker run --rm -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
+docker run --rm --tmpfs /tmp:exec,size=4g -v "$PWD/whatsapp-bridge:/src" $V -w /src golang:1.27-alpine \
   sh -c 'apk add --no-cache gcc musl-dev && go test -race -count=3 -timeout 120m ./...'
 # golangci-lint runs on the LF copy built above (not on the CRLF tree), same cache volumes:
 docker run --rm -v "$(cd "$LF" && pwd -W)/whatsapp-bridge:/src" $V -w /src \
@@ -547,7 +552,7 @@ Compose-only proxy knobs: `WHATSAPP_PROXY_NETWORK` (default `proxy`) names an ex
 13. **Bridge logs go through `bridgeLog`, not `fmt.Print*`.** The text writer formats once, prefixes every physical line, marks continuations and caps each line at 8 KiB. Control and bidi overrides are escaped and backslashes doubled; values from a stanza need no quoting at the call site (`logging.go`). Levels: `Errorf` for failures that lose data, `Warnf` for degraded-but-continuing, `Infof` for lifecycle, `Debugf` for per-request traces and message echoes (user content stays out of `INFO`). Direct stdout exceptions are the first-run token banner and the pairing QR code for a human, plus the bounded state-name output of `--operator-status` for the smoke script.
 14. **REST starts before pairing.** `/api/health` is liveness (200 once the listener is up, body carries `connected`/`paired`); `/api/ready` is readiness (200 only while connected). Endpoints that need WhatsApp check `client.IsConnected()` themselves.
 15. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
-16. **One timestamp spelling.** Every TIMESTAMP column the bridge writes holds `YYYY-MM-DD HH:MM:SS+00:00` (UTC, seconds, fixed width) — `dbTime()` in `store_time.go`, never a bound `time.Time`, or the driver stamps the machine's local offset and `ORDER BY timestamp` starts sorting by wall clock. Read with `parseDBTime` / `anchorTime`, which also accept the legacy spellings. A time column that can contain legacy values goes in `canonicalTimeColumns` (and changes `canonicalTimestampsMigration` to a new name so that rewrite runs again; each data migration owns a name in `schema_migrations`, never a shared version counter; `applyNamedMigration` commits one-off effects and the marker together, while timestamps explicitly record completion after their idempotent chunks). New tables written only through `dbTime` need no timestamp rewrite or new marker (for example `group_members` and `pending_receipts`). Bounds compared against such a column must be rendered the same way on both sides.
+16. **One timestamp spelling.** Every TIMESTAMP column the bridge writes holds `YYYY-MM-DD HH:MM:SS+00:00` (UTC, seconds, fixed width) — `dbTime()` in `store_time.go`. The `messages.db` handle from `openMessagesDB` (`store_dir.go`) renders every bound `time.Time` with `dbTime` itself (`canonicalTimeConnector`), so a raw bound time is stored canonically too; any other handle on that file would let the driver stamp the value's own offset, and `ORDER BY timestamp` would sort by wall clock (`TestMessagesDBIsOpenedOnlyThroughOpenMessagesDB` refuses one). Read with `parseDBTime` / `anchorTime`, which also accept the legacy spellings. A time column that can contain legacy values goes in `canonicalTimeColumns` (and changes `canonicalTimestampsMigration` to a new name so that rewrite runs again; each data migration owns a name in `schema_migrations`, never a shared version counter; `applyNamedMigration` commits one-off effects and the marker together, while timestamps explicitly record completion after their idempotent chunks). New tables written only through `dbTime` need no timestamp rewrite or new marker (for example `group_members` and `pending_receipts`). Bounds compared against such a column must be rendered the same way on both sides.
 17. **Every database handle has a pool bound.** `database/sql` opens one connection per concurrent goroutine unless told not to, and SQLite has one WAL writer, so extra connections cost memory and `SQLITE_BUSY` (issue #471). Each production `sql.Open` is followed by `boundPool` (`store_dir.go`: 4 for `messages.db` and the whatsmeow session store, 2 for the read-only contacts handle; `store_pool_test.go` scans for a missing call). A rows cursor held while the loop writes needs a second connection, a cursor plus a transaction a third in the worst case: drain a cursor before opening a transaction, and keep a cursor from living across a slow callback. Media purge drains pages of 256 rows and closes each cursor before disk callbacks. `/metrics` exposes `whatsapp_bridge_db_in_use`, `whatsapp_bridge_db_wait_total` and `whatsapp_bridge_db_wait_seconds_total` with fixed `pool="messages|session|contacts"` labels. Startup migrations detach their session alias on the same connection before it returns to the pool; single-writer redesign remains a separate decision.
 
 ## 9. Where to make changes
@@ -592,5 +597,32 @@ Compose-only proxy knobs: `WHATSAPP_PROXY_NETWORK` (default `proxy`) names an ex
 - Larger efforts get an `epic` issue holding the checklist; §4 step 1 says how to list the open ones and names the closed ones.
 - Bugs from operation: include bridge log lines, `docker compose ps`, the tool call and its result; redact phone numbers.
 - "Won't do" is a valid outcome; close with a sentence explaining why.
+
+## 12. Rules and what enforces them
+
+Each rule here is a mistake agents made in this repository more than once. A rule with a check fails CI when it is broken, and the check's message names the fix. A rule without one is a judgment call that no check can make; it is listed so a reviewer looks for it. When the operator corrects an agent, fix the mistake and add its rule here. If the rule was already here with nothing enforcing it, that is a repeat: enforce it in the same change, at the highest level that works (architecture, then types, then a lint or test, docs last). Drop a row once its mistake can no longer be written.
+
+| Rule | Enforced by |
+|---|---|
+| Go files are gofmt-clean | `*.go text eol=lf` in `.gitattributes` (gofmt runs on the working copy, Windows included) + the `gofmt` formatter in `whatsapp-bridge/.golangci.yml` |
+| A `//nolint` names its linter and a reason, and still silences something | `nolintlint` in `whatsapp-bridge/.golangci.yml` |
+| Timestamps in `messages.db` use the one canonical spelling | `canonicalTimeConnector` (`store_time.go`) renders every bound `time.Time`; `TestMessagesDBIsOpenedOnlyThroughOpenMessagesDB` (`store_pool_test.go`) refuses another writer handle; `TestBoundTimeIsStoredInCanonicalSpelling` |
+| The test message store behaves like production (one database for every pooled connection, bounded pool, canonical bound times; only foreign keys stay off for the fixtures) | `newTestMessageStore` opens through `openMessagesDB`; `TestTestMessageStoreConnectionsShareOneDatabase` |
+| Every `sql.Open` / `sql.OpenDB` gets a pool bound | `TestEverySQLOpenIsFollowedByAPoolBound` (`store_pool_test.go`) |
+| Tests never write into the source tree's `store/` | `testStoreDir` / `requireTemporaryStore` (`test_store_guard_test.go`) |
+| A new env var is documented in its four places | `tests/test_env_docs.py` |
+| A new top-level module is in the §3 tree (and, for Python, in `py-modules`) | `tests/test_agents_file_tree.py` |
+| Public files carry fake identifiers only | `tests/test_fake_identifiers.py` |
+| Every MCP tool declares its annotations | `tests/test_tool_annotations.py` |
+| A tool that calls the bridge is mapped to its endpoints; every mutating endpoint is mapped | `tests/test_bridge_tool_policy.py`, `TestEndpointToolsCoversEveryMutatingEndpoint` (`tool_policy_test.go`) |
+| A tool refuses arguments it does not declare | `StrictArgumentServer` (`strict_args.py`), `tests/test_strict_args.py` |
+| A reviewed `nosec B608` cannot silently cover new SQL | `tests/test_bandit_nosec_inventory.py` |
+| Only green, up-to-date PRs merge | the "protect main" ruleset + `scripts/merge-when-green.sh` |
+| No data races, no goroutine outliving its test | `go test -race` in CI — detection only, it catches what the tests happen to exercise |
+| A test waits for a signal, not for a guessed duration; never raise a per-test deadline to make a suite fit | judgment: most fixes in the history are deadlines too tight for a loaded, race or QEMU runner (#612, #689, #703, #736, #775) |
+| Phone/LID twins and the Brazilian ninth digit are handled on every path that takes a number or chat, not just the one being fixed | judgment, with per-tool tests (`tests/test_phone_spellings.py`, `test_chat_twins.py`, `test_recipient_spellings.py`); a fix for one path is a reason to grep for the others (#366, #475, #827) |
+| Background and implicit paths (ingest worker, webhook, implicit downloads) honour the chat allow-list and the tool policy like the tool they stand in for | judgment, with behaviour tests per path (#331, #350, #484, #667) |
+| A cursor is drained before a transaction or slow callback on the same pool | judgment (§8 gotcha 17), with pool behaviour tests (#573, #626) |
+| A new or changed tool updates `docs/TOOLS.md` and its docstring | judgment |
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the human-facing contribution guide, [`docs/DOCKER.md`](./docs/DOCKER.md) for operations and [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) for the user-facing variable reference.

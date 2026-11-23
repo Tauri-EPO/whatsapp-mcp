@@ -14,14 +14,14 @@ import (
 	"time"
 )
 
-// Every production sql.Open must be followed by an explicit pool bound, or a
-// burst opens one connection per goroutine (issue #471).
+// Every production sql.Open or sql.OpenDB must be followed by an explicit pool
+// bound, or a burst opens one connection per goroutine (issue #471).
 func TestEverySQLOpenIsFollowedByAPoolBound(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	open := regexp.MustCompile(`\bsql\.Open\(`)
+	open := regexp.MustCompile(`\bsql\.Open(DB)?\(`)
 	sites := 0
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -39,12 +39,48 @@ func TestEverySQLOpenIsFollowedByAPoolBound(t *testing.T) {
 			sites++
 			end := min(i+10, len(lines))
 			if !strings.Contains(strings.Join(lines[i:end], "\n"), "boundPool(") {
-				t.Errorf("%s:%d: sql.Open without a boundPool call in the next lines", name, i+1)
+				t.Errorf("%s:%d: sql.Open/OpenDB without a boundPool call in the next lines", name, i+1)
 			}
 		}
 	}
 	if sites < 3 {
 		t.Fatalf("found %d sql.Open sites, expected the messages, contacts and session handles", sites)
+	}
+}
+
+// messages.db is written only through openMessagesDB, whose connection stores
+// a bound time.Time in dbTime's spelling. A handle opened with the writer
+// options anywhere else would bring back the raw driver rendering.
+func TestMessagesDBIsOpenedOnlyThroughOpenMessagesDB(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uses := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(name) //nolint:gosec // the package's own source files, from a fixed glob
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			if !strings.Contains(line, "messagesWriterOptions") {
+				continue
+			}
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "messagesWriterOptions =") {
+				continue
+			}
+			uses++
+			if name != "store_dir.go" || !strings.Contains(line, "openMessagesDBWithOptions(path, messagesWriterOptions)") {
+				t.Errorf("%s:%d: open messages.db with openMessagesDB (store_dir.go), which stores bound times in dbTime's spelling", name, i+1)
+			}
+		}
+	}
+	if uses != 1 {
+		t.Fatalf("found %d uses of messagesWriterOptions, expected the one in openMessagesDB", uses)
 	}
 }
 

@@ -87,11 +87,21 @@ const testMemoryDSN = "file::memory:?" + sqliteTimeFormat
 func newTestMessageStore(t testing.TB) *MessageStore {
 	t.Helper()
 	testStoreDir(t)
-	db, err := sql.Open("sqlite", testMemoryDSN)
-	if err != nil {
-		t.Fatalf("failed to open in-memory db: %v", err)
+	// The production opener, on a file: every pooled connection sees the same
+	// database. Each `:memory:` connection used to be a separate, empty one, so
+	// code under test that took a second connection (a background worker) got
+	// "no such table" (#737, and main broken on arm64 by #818). Two options
+	// differ from production: foreign keys stay off, as they were on that
+	// store, because fixtures insert messages without their chat row; and
+	// synchronous(OFF), because a test never survives a power cut and an
+	// fsync per commit made each store ~20x slower to set up.
+	options := strings.Replace(messagesWriterOptions, "_pragma=foreign_keys(1)&", "", 1)
+	if options == messagesWriterOptions {
+		t.Fatal("messagesWriterOptions no longer enables foreign keys where the test store expects")
 	}
-	_, err = db.Exec(`
+	options += "&_pragma=synchronous(OFF)"
+	db := openMessagesDBWithOptions(filepath.Join(t.TempDir(), "messages.db"), options)
+	_, err := db.Exec(`
 		CREATE TABLE chats (
 			jid TEXT PRIMARY KEY,
 			name TEXT,
