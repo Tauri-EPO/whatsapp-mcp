@@ -30,6 +30,7 @@ func TestArchivePatch(t *testing.T) {
 			store := newTestMessageStore(t)
 			ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 			for _, id := range []string{"M2", "M1"} {
+				seedChats(t, store, tc.chat)
 				if err := store.StoreMessage(storedMessage{
 					ID:         id,
 					ChatJID:    tc.chat,
@@ -116,6 +117,7 @@ func TestArchiveFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestMessageStore(t)
 			if tc.seed {
+				seedChats(t, store, archiveTestChat)
 				if err := store.StoreMessage(storedMessage{
 					ID:         "M1",
 					ChatJID:    archiveTestChat,
@@ -184,6 +186,7 @@ func TestArchiveUnknownGroupAnchorRejected(t *testing.T) {
 	for _, sender := range []string{"120363000000000001", "100000000000001", "", group} {
 		t.Run(sender, func(t *testing.T) {
 			store := newTestMessageStore(t)
+			seedChats(t, store, group)
 			if err := store.StoreMessage(storedMessage{
 				ID:         "M1",
 				ChatJID:    group,
@@ -221,6 +224,7 @@ func TestArchiveTwinsAndPointerRows(t *testing.T) {
 				{"PN", archiveTestChat, "", ts.Add(-time.Hour)}, {"LID", lid, "", ts},
 				{"REACTION", lid, "reaction", ts.Add(time.Hour)}, {"VOTE", lid, "poll_vote", ts.Add(2 * time.Hour)},
 			} {
+				seedChats(t, store, row.chat)
 				if err := store.StoreMessage(storedMessage{
 					ID:         row.id,
 					ChatJID:    row.chat,
@@ -269,6 +273,7 @@ func TestArchiveOutcomeAndTargetRefusals(t *testing.T) {
 		}
 	}
 	store := newTestMessageStore(t)
+	seedChats(t, store, archiveTestChat)
 	if err := store.StoreMessage(storedMessage{
 		ID:         "M1",
 		ChatJID:    archiveTestChat,
@@ -325,6 +330,7 @@ func TestArchiveResolutionDeadline(t *testing.T) {
 func TestArchiveParticipantCancellation(t *testing.T) {
 	store := newTestMessageStore(t)
 	group := "120363000000000001@g.us"
+	seedChats(t, store, group)
 	if err := store.StoreMessage(storedMessage{
 		ID:         "M1",
 		ChatJID:    group,
@@ -358,6 +364,7 @@ func TestArchiveDefiniteRejections(t *testing.T) {
 		errors.New("no app state keys found, creating app state keys is not yet supported")} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			store := newTestMessageStore(t)
+			seedChats(t, store, archiveTestChat)
 			if err := store.StoreMessage(storedMessage{
 				ID:         "M1",
 				ChatJID:    archiveTestChat,
@@ -383,6 +390,7 @@ func TestArchiveDefiniteRejections(t *testing.T) {
 
 func TestArchiveAcceptedPatchDisconnectedConfirmation(t *testing.T) {
 	store := newTestMessageStore(t)
+	seedChats(t, store, archiveTestChat)
 	if err := store.StoreMessage(storedMessage{
 		ID:         "M1",
 		ChatJID:    archiveTestChat,

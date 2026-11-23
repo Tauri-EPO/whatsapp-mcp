@@ -155,6 +155,7 @@ func TestDeleteForMeLocalMediaFirst(t *testing.T) {
 
 func TestDeleteForMeRefusesPointerRows(t *testing.T) {
 	store := newTestMessageStore(t)
+	seedChats(t, store, archiveTestChat)
 	if err := store.StoreMessage(storedMessage{ID: "R1", ChatJID: archiveTestChat, Sender: chatDeleteLID, Timestamp: time.Now(), MediaType: "reaction"}); err != nil {
 		t.Fatal(err)
 	}

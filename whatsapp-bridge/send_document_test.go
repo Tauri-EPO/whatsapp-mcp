@@ -170,6 +170,7 @@ func TestCachedMediaAsDocument(t *testing.T) {
 			b := testBridge(t, newTestClient(&mockLIDStore{}), newTestMessageStore(t), testLogger())
 			data := []byte("\xff\xd8\xfffake")
 			b.MediaStorage = secondReviewMediaStorage{data: data}
+			seedChats(t, b.Store, testGroupJID)
 			if err := b.Store.StoreMessage(storedMessage{ID: "SOURCE", ChatJID: testGroupJID, Sender: selfPhone.String(), Timestamp: time.Now(), MediaType: tc.kind, Filename: tc.name}); err != nil {
 				t.Fatal(err)
 			}

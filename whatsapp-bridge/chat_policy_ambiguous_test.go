@@ -200,6 +200,7 @@ func TestForwardAmbiguousDestinationNeverReachesSend(t *testing.T) {
 			if allow == "*@s.whatsapp.net" {
 				source, target = efChat, "120363000000000002@g.us@s.whatsapp.net"
 			}
+			seedChats(t, b.Store, source)
 			if err := b.Store.StoreMessage(storedMessage{
 				ID:         "SOURCE1",
 				ChatJID:    source,

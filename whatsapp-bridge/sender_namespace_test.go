@@ -80,6 +80,7 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 	chat := "status@broadcast"
 	ts := time.Now()
 
+	seedChats(t, ms, chat)
 	if err := ms.StoreMessage(storedMessage{
 		ID:         "LID",
 		ChatJID:    chat,
@@ -159,6 +160,7 @@ func TestStoreMessage_RecordsSenderNamespace(t *testing.T) {
 func TestBatchStoreMessage_RecordsSenderNamespace(t *testing.T) {
 	ms := newTestMessageStore(t)
 	chat := "5511999990004-1400000000@g.us"
+	seedChats(t, ms, chat)
 
 	if err := ms.Batch(func(b *messageBatch) error {
 		return b.StoreMessage(storedMessage{

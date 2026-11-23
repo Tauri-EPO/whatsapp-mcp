@@ -271,6 +271,7 @@ func TestMessagesFTSMigrationFailurePreservesWrites(t *testing.T) {
 			if exists, _ := messagesFTSExists(store.db); exists {
 				t.Fatal("failed optional index remains active")
 			}
+			seedChats(t, store, "c")
 			if err := store.StoreMessage(storedMessage{ID: "after-failure", ChatJID: "c", Sender: "s", Content: "still writable", Timestamp: time.Now()}); err != nil {
 				t.Fatalf("StoreMessage after failed migration: %v", err)
 			}

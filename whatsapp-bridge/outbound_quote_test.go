@@ -65,6 +65,7 @@ func TestReplyRESTWireStoredPreview(t *testing.T) {
 					if kind == "other-chat" {
 						quoteChat = phonePN.String()
 					}
+					seedChats(t, b.Store, quoteChat)
 					if err := b.Store.StoreMessage(storedMessage{
 						ID:            "QPRE",
 						ChatJID:       quoteChat,
@@ -233,6 +234,7 @@ func TestReplyRESTWireStoredAuthor(t *testing.T) {
 					quoteChat = phonePN.String()
 				}
 				if !tc.missing {
+					seedChats(t, b.Store, quoteChat)
 					if err := b.Store.StoreMessage(storedMessage{
 						ID:        "QAUTHOR",
 						ChatJID:   quoteChat,
@@ -370,6 +372,7 @@ func TestReplyHTTPDisconnectCancelsLIDLookupsBeforeUpload(t *testing.T) {
 				payload.QuotedMessageID, payload.QuotedSenderJID, lids.blockPN = "Q1", phonePN.String(), phonePN
 			case "stored-author":
 				payload.QuotedMessageID, lids.blockPN = "Q1", phonePN
+				seedChats(t, b.Store, payload.Recipient)
 				if err := b.Store.StoreMessage(storedMessage{
 					ID:        "Q1",
 					ChatJID:   payload.Recipient,

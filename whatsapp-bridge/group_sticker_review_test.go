@@ -229,6 +229,7 @@ func TestReviewForwardRefusalReleasesBudget(t *testing.T) {
 	b.sendMessage = func(context.Context, types.JID, *waE2E.Message) (whatsmeow.SendResponse, error) {
 		return whatsmeow.SendResponse{}, whatsmeow.ErrNoPermissionInGroup
 	}
+	seedChats(t, b.Store, testGroupJID)
 	if _, err := b.Store.db.Exec(`INSERT INTO messages(id,chat_jid,sender,content,timestamp,is_from_me) VALUES ('SOURCE',?,'100000000001','forward text',?,0)`, testGroupJID, dbTime(time.Now())); err != nil {
 		t.Fatal(err)
 	}

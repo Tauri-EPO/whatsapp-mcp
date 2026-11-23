@@ -109,6 +109,7 @@ func TestMediaPresentationColumnMigrationKeepsOldRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	seedChats(t, ms, mediaTestChat)
 	if _, err := ms.db.Exec("INSERT INTO messages (id,chat_jid,content,timestamp,media_type,filename,file_length) VALUES ('OLD1',?,'old',?,'document','report.pdf',3)", mediaTestChat, dbTime(ts)); err != nil {
 		t.Fatal(err)
 	}

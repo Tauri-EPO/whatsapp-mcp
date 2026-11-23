@@ -64,9 +64,11 @@ func TestHistoryTwinSendOutcomes(t *testing.T) {
 				log := installRecordingLogger(t)
 				ms := newTestMessageStore(t)
 				ts := time.Now().Truncate(time.Second)
+				seedChats(t, ms, tc.chat.String())
 				if err := ms.StoreMessage(storedMessage{ID: "TARGET", ChatJID: tc.chat.String(), Content: "hello", Timestamp: ts}); err != nil {
 					t.Fatal(err)
 				}
+				seedChats(t, ms, "")
 				if err := ms.StoreMessage(storedMessage{ID: "EMPTY", ChatJID: "", Content: "hello", Timestamp: ts.Add(-time.Hour)}); err != nil {
 					t.Fatal(err)
 				}
@@ -146,6 +148,7 @@ func TestHistoryTwinPolicyAndStorage(t *testing.T) {
 					t.Run(fmt.Sprintf("%s/typed=%s/stored=%s/repair=%v", mode, typed.Server, stored.Server, repair), func(t *testing.T) {
 						ms := newTestMessageStore(t)
 						ts := time.Now().Truncate(time.Second)
+						seedChats(t, ms, stored.String())
 						if err := ms.StoreMessage(storedMessage{ID: "TARGET", ChatJID: stored.String(), Content: "hello", Timestamp: ts}); err != nil {
 							t.Fatal(err)
 						}
@@ -271,6 +274,7 @@ func TestHistoryTwinPlainOldestAcrossSpellings(t *testing.T) {
 					{ID: "LID", ChatJID: phoneLID.String(), Timestamp: lidTime},
 				} {
 					row.Content = "hello"
+					seedChats(t, ms, row.ChatJID)
 					if err := ms.StoreMessage(row); err != nil {
 						t.Fatal(err)
 					}
@@ -319,6 +323,7 @@ func TestHistoryTwinReplyRepairsStoredSpelling(t *testing.T) {
 			ts := time.Now().Add(-time.Hour).Truncate(time.Second)
 			legacy := fixtureDocument()
 			legacy.DirectPath = nil
+			seedChats(t, ms, storedChat.String())
 			if err := persistMessage(ms, "TARGET", storedChat.String(), storedChat.String(), ts, false,
 				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, "TARGET"), false, b.Log); err != nil {
 				t.Fatal(err)

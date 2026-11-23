@@ -546,3 +546,18 @@ func TestTestMessageStoreConnectionsShareOneDatabase(t *testing.T) {
 		t.Fatalf("second connection: n=%d err=%v", n, err)
 	}
 }
+
+// The test store enforces messages.chat_jid like production (#864): a fixture
+// that stores a message before its chat fails here instead of passing on a
+// state the bridge would refuse. seedChats is the fixture-side fix.
+func TestTestMessageStoreEnforcesForeignKeys(t *testing.T) {
+	ms := newTestMessageStore(t)
+	err := ms.StoreMessage(storedMessage{ID: "M1", ChatJID: "5511999999999@s.whatsapp.net", Content: "hi", Timestamp: time.Now()})
+	if err == nil || !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Fatalf("message without its chat: err=%v, want a foreign key failure", err)
+	}
+	seedChats(t, ms, "5511999999999@s.whatsapp.net")
+	if err := ms.StoreMessage(storedMessage{ID: "M1", ChatJID: "5511999999999@s.whatsapp.net", Content: "hi", Timestamp: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+}
