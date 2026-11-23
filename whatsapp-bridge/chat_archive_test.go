@@ -29,8 +29,8 @@ func TestArchivePatch(t *testing.T) {
 		for _, archived := range []bool{true, false} {
 			store := newTestMessageStore(t)
 			ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			seedChats(t, store, tc.chat)
 			for _, id := range []string{"M2", "M1"} {
-				seedChats(t, store, tc.chat)
 				if err := store.StoreMessage(storedMessage{
 					ID:         id,
 					ChatJID:    tc.chat,
@@ -217,6 +217,7 @@ func TestArchiveTwinsAndPointerRows(t *testing.T) {
 		for _, restricted := range []bool{false, true} {
 			store := newTestMessageStore(t)
 			ts := time.Now()
+			seedChats(t, store, archiveTestChat, lid)
 			for _, row := range []struct {
 				id, chat, kind string
 				ts             time.Time
@@ -224,7 +225,6 @@ func TestArchiveTwinsAndPointerRows(t *testing.T) {
 				{"PN", archiveTestChat, "", ts.Add(-time.Hour)}, {"LID", lid, "", ts},
 				{"REACTION", lid, "reaction", ts.Add(time.Hour)}, {"VOTE", lid, "poll_vote", ts.Add(2 * time.Hour)},
 			} {
-				seedChats(t, store, row.chat)
 				if err := store.StoreMessage(storedMessage{
 					ID:         row.id,
 					ChatJID:    row.chat,

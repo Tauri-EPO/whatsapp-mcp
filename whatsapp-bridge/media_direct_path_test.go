@@ -929,10 +929,10 @@ func TestHistoryRepairAliasDiscoveryOncePerChat(t *testing.T) {
 	legacy := fixtureDocument()
 	legacy.DirectPath = nil
 	var rows []*waHistorySync.HistorySyncMsg
+	seedChats(t, ms, phoneLID.String())
 	for i := 0; i <= historyBatchMessages; i++ {
 		id := fmt.Sprintf("CHUNK%d", i)
 		if i == 0 || i == historyBatchMessages {
-			seedChats(t, ms, phoneLID.String())
 			if err := persistMessage(ms, id, phoneLID.String(), phoneLID.String(), ts, false,
 				extractMessage(&waE2E.Message{DocumentMessage: legacy}, ts, id), false, b.Log); err != nil {
 				t.Fatal(err)

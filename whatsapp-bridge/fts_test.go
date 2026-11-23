@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -252,8 +253,11 @@ func TestMessagesFTSMigrationFailurePreservesWrites(t *testing.T) {
 				END;`); err != nil {
 				t.Fatal(err)
 			}
-			if err := store.StoreMessage(storedMessage{ID: "before-failure", ChatJID: "c", Sender: "s", Content: "broken trigger", Timestamp: time.Now()}); err == nil {
-				t.Fatal("broken leftover trigger must refuse a real StoreMessage before cleanup")
+			// The chat exists, so the only thing that can refuse this write is
+			// the broken trigger (not the messages.chat_jid foreign key).
+			seedChats(t, store, "c")
+			if err := store.StoreMessage(storedMessage{ID: "before-failure", ChatJID: "c", Sender: "s", Content: "broken trigger", Timestamp: time.Now()}); err == nil || !strings.Contains(err.Error(), "missing_fts_module") {
+				t.Fatalf("broken leftover trigger must refuse a real StoreMessage before cleanup: %v", err)
 			}
 			on, err := ensureMessagesFTSMigration(store.db, true, func(tx *sql.Tx) error {
 				if _, err := tx.Exec(ftsTeardown + ftsViewSchema + ftsSchema); err != nil {
@@ -271,7 +275,6 @@ func TestMessagesFTSMigrationFailurePreservesWrites(t *testing.T) {
 			if exists, _ := messagesFTSExists(store.db); exists {
 				t.Fatal("failed optional index remains active")
 			}
-			seedChats(t, store, "c")
 			if err := store.StoreMessage(storedMessage{ID: "after-failure", ChatJID: "c", Sender: "s", Content: "still writable", Timestamp: time.Now()}); err != nil {
 				t.Fatalf("StoreMessage after failed migration: %v", err)
 			}
