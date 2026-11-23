@@ -50,29 +50,60 @@ FAMILY = "120363000000000001@g.us"
 DECOY = "15511999999999@s.whatsapp.net"
 CARLA = "5521777777777@s.whatsapp.net"
 
-# The bridge's default store, in the source tree. The MCP server's default
-# messages.db path points here, so a test that opens notes.db (or any store
-# file) without its own path writes into the checkout (issue #863).
-SOURCE_STORE = Path(__file__).resolve().parents[2] / "whatsapp-bridge" / "store"
+# The MCP server's import-time store: the source tree's whatsapp-bridge/store,
+# or whatever WHATSAPP_STORE_DIR / WHATSAPP_DB_PATH named in the shell running
+# pytest, which can be a live store. Captured before any test patches them.
+DEFAULT_STORE_DIRS = tuple(
+    dict.fromkeys(Path(p).resolve().parent for p in (whatsapp.MESSAGES_DB_PATH, whatsapp.WHATSMEOW_DB_PATH))
+)
 
 
 @pytest.fixture(autouse=True)
-def _no_source_tree_store():
-    """A test that creates the source tree's store fails, naming itself.
+def _default_store_is_temporary(monkeypatch, tmp_path_factory):
+    """A test that names no store gets an empty temporary one (issue #863).
 
-    A checkout that already has a store there (a bridge run from the source
-    tree) is left alone: nothing is deleted, and only new files would show.
+    Without this, code that opens notes.db next to the default messages.db
+    wrote into the checkout. Autouse fixtures run first, so paired_store,
+    auth_runtime_store and a test's own monkeypatch still win.
     """
-    before = set(SOURCE_STORE.iterdir()) if SOURCE_STORE.is_dir() else None
+    store = tmp_path_factory.mktemp("default-store")
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(store / "messages.db"))
+    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(store / "whatsapp.db"))
+    monkeypatch.setattr(whatsapp, "_BRIDGE_TOKEN_PATH", str(store / ".bridge-token"))
+
+
+def _store_snapshot(directory: Path) -> dict[str, int] | None:
+    """Top-level entries and their mtimes: new files, rewritten files and new
+    files directly inside a subdirectory (exports/) all change it."""
+    if not directory.is_dir():
+        return None
+    return {entry.name: entry.stat().st_mtime_ns for entry in directory.iterdir()}
+
+
+@pytest.fixture(autouse=True)
+def _no_default_store_writes():
+    """A test that still writes into the default store fails, naming itself.
+
+    Backstop for code that derives a store path some other way. Nothing is
+    deleted. A store with a .bridge.lock belongs to a bridge that may be
+    running, so it is not checked: its own writes would blame an unrelated test.
+    """
+    watched = [d for d in DEFAULT_STORE_DIRS if not (d / ".bridge.lock").exists()]
+    before = {d: _store_snapshot(d) for d in watched}
     yield
-    after = set(SOURCE_STORE.iterdir()) if SOURCE_STORE.is_dir() else None
-    if after is not None and after != before:
-        created = sorted(p.name for p in after - (before or set()))
-        pytest.fail(
-            f"this test wrote {created} into {SOURCE_STORE}: point whatsapp.MESSAGES_DB_PATH "
-            "at tmp_path (monkeypatch, or the paired_store / auth_runtime_store fixtures)",
-            pytrace=False,
-        )
+    for directory in watched:
+        after = _store_snapshot(directory)
+        if after is None:
+            continue
+        old = before[directory] or {}
+        written = sorted(name for name, mtime in after.items() if old.get(name) != mtime)
+        if written:
+            pytest.fail(
+                f"this test wrote {written} into the default store {directory}: give it a store "
+                "under tmp_path (monkeypatch whatsapp.MESSAGES_DB_PATH, or the paired_store / "
+                "auth_runtime_store fixtures)",
+                pytrace=False,
+            )
 
 
 @pytest.fixture(autouse=True)

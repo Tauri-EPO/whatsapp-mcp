@@ -94,14 +94,14 @@ jobs:
       - name: Build, vet, test
         timeout-minutes: 23
         # The test message store is a WAL SQLite file under t.TempDir() (#860):
-        # TMPDIR on /dev/shm keeps those commits in memory, GOTMPDIR keeps the
-        # go command's work files and test binaries on disk (/dev/shm can be
-        # mounted noexec). /dev/shm itself, not a subdirectory: a temp dir name
-        # is up to ~80 bytes and the socket tests' paths must stay under 108.
+        # TMPDIR on /dev/shm keeps those commits in memory. GOTMPDIR stays
+        # unset: with it on the runner temp, t.TempDir landed there instead and
+        # the test store guard refused it. /dev/shm itself, not a subdirectory:
+        # a temp dir name is up to ~80 bytes and socket paths must stay < 108.
         env:
           TMPDIR: /dev/shm
-          GOTMPDIR: ${{ runner.temp }}
         run: |
+          df -h /dev/shm
           cd whatsapp-bridge
           timeout --kill-after=5s 120s go build -v ./...
           timeout --kill-after=5s 120s go vet ./...
@@ -111,6 +111,10 @@ jobs:
           TZ=America/Sao_Paulo go test -timeout 8m ./...
       - name: Operator socket denial cases (runner uid, no skips)
         timeout-minutes: 3
+        # Same scratch as the other Go steps, so the socket path lengths this
+        # step checks are the ones they run with.
+        env:
+          TMPDIR: /dev/shm
         run: |
           id -u
           cd whatsapp-bridge
@@ -127,7 +131,6 @@ jobs:
         # Test scratch in memory, as in "Build, vet, test".
         env:
           TMPDIR: /dev/shm
-          GOTMPDIR: ${{ runner.temp }}
         run: |
           cd whatsapp-bridge
           go test -race -timeout 40m ./...

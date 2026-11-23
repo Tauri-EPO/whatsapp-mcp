@@ -225,12 +225,8 @@ def test_the_worker_names_tools_the_server_actually_registers():
 
 
 @pytest.fixture
-def installed(monkeypatch, auth_runtime_store):
-    """install_ingest_worker without a thread: the configs it would have started.
-
-    Installing settles the sent-audio bound in notes.db, so the store is a
-    temporary one, not the source tree's default (issue #863).
-    """
+def installed(monkeypatch):
+    """install_ingest_worker without a thread: the configs it would have started."""
     configs: list[transcribe_worker.IngestConfig] = []
     monkeypatch.setattr(transcribe_worker, "start_worker", configs.append)
     return configs
