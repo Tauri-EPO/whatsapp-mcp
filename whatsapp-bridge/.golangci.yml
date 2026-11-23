@@ -22,8 +22,8 @@ linters:
       require-specific: true
 
 # `golangci-lint run` reports formatting drift; `golangci-lint fmt` fixes it.
-# Windows checkouts are CRLF (core.autocrlf=true) and gofmt rewrites line
-# endings, so run it on an LF view of the tree (AGENTS.md §5).
+# .gitattributes checks *.go out with LF everywhere, so both run on the
+# working copy, Windows included (AGENTS.md §5).
 formatters:
   enable:
     - gofmt

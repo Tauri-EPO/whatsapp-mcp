@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"modernc.org/sqlite"
 )
 
 const storeDirEnv = "WHATSAPP_STORE_DIR"
@@ -132,14 +134,19 @@ func openStoreRoot() (*os.Root, error) {
 }
 
 // sqliteURI builds a `file:` DSN for a store file. SQLite URIs want forward
-// slashes even on Windows.
+// slashes even on Windows, and "%", "?" and "#" in the path percent-encoded:
+// unescaped, "?" or "#" ends the path, so a store directory spelled with one
+// opened a different file and lost the DSN options (a test subdirectory named
+// "...#01" did exactly that).
 func sqliteURI(path, query string) string {
-	uri := "file:" + filepath.ToSlash(path)
+	uri := "file:" + sqliteURIPathEscaper.Replace(filepath.ToSlash(path))
 	if query != "" {
 		uri += "?" + query
 	}
 	return uri
 }
+
+var sqliteURIPathEscaper = strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23")
 
 // SQLite DSN options for every handle the bridge opens (modernc.org/sqlite
 // syntax). WAL lets readers (the MCP server, our own contact lookups) proceed
@@ -178,6 +185,26 @@ const (
 func boundPool(db *sql.DB, conns int) {
 	db.SetMaxOpenConns(conns)
 	db.SetMaxIdleConns(conns)
+}
+
+// openMessagesDB is the one way to open messages.db for writing, in
+// production and in tests (newTestMessageStore): the bridge's DSN options,
+// the bounded pool and canonicalTimeConnector, so a bound time.Time is stored
+// in dbTime's spelling whichever handle wrote it.
+func openMessagesDB(path string) (*sql.DB, error) {
+	return openMessagesDBWithOptions(path, messagesWriterOptions)
+}
+
+// openMessagesDBWithOptions is openMessagesDB with other DSN options; only
+// the test store uses it, to keep foreign keys off for its fixtures.
+func openMessagesDBWithOptions(path, options string) (*sql.DB, error) {
+	base, err := sqlite.NewConnector(sqliteURI(path, options))
+	if err != nil {
+		return nil, err
+	}
+	db := sql.OpenDB(canonicalTimeConnector{base: base})
+	boundPool(db, messagesPoolConns)
+	return db, nil
 }
 
 // openSessionDB opens whatsmeow's session database (whatsapp.db) with its pool

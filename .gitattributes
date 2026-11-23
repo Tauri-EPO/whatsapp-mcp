@@ -2,3 +2,8 @@
 # a CRLF shebang breaks them, so pin LF regardless of core.autocrlf.
 *.sh text eol=lf
 Dockerfile text eol=lf
+# gofmt (and golangci-lint's gofmt formatter) treats CRLF as unformatted, so
+# a Windows checkout with core.autocrlf=true could not be checked in place
+# (issue #399, hotfix #405). LF on every platform lets the gates run on the
+# working copy itself.
+*.go text eol=lf

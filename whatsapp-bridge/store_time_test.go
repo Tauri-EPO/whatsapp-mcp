@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -445,5 +446,103 @@ func TestLegacyTimeProbeQueryPlan(t *testing.T) {
 		if indexed[name] && !strings.Contains(detail, "INDEX") {
 			t.Errorf("%s probe no longer uses an index: %s", name, detail)
 		}
+	}
+}
+
+// A write that binds the raw time.Time instead of dbTime(t) is the mistake
+// behind issue #270 and two later fixes. The messages.db connection renders
+// every bound time itself, so such a write still stores the canonical text,
+// and a bound used as a bound compares against the column correctly.
+func TestBoundTimeIsStoredInCanonicalSpelling(t *testing.T) {
+	sao, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := newTestMessageStore(t)
+	local := time.Date(2026, 9, 7, 17, 10, 8, 500_000_000, sao) // 20:10:08.5 UTC
+	const want = "2026-09-07 20:10:08+00:00"
+	stored := func(jid string) string {
+		t.Helper()
+		var text sql.NullString
+		if err := ms.db.QueryRow(`SELECT CAST(last_message_time AS TEXT) FROM chats WHERE jid = ?`, jid).Scan(&text); err != nil {
+			t.Fatal(err)
+		}
+		return text.String
+	}
+
+	if _, err := ms.db.Exec(`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`, "exec@s.whatsapp.net", "Alice", local); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.db.Exec(`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`, "pointer@s.whatsapp.net", "Bob", &local); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.db.Exec(`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`, "nulltime@s.whatsapp.net", "Carol", sql.NullTime{Time: local, Valid: true}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := ms.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stmt.Exec("prepared@s.whatsapp.net", "Dave", local); err != nil {
+		t.Fatal(err)
+	}
+	var none *time.Time
+	if _, err := stmt.Exec("nilpointer@s.whatsapp.net", "Eve", none); err != nil {
+		t.Fatal(err)
+	}
+	_ = stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, jid := range []string{"exec@s.whatsapp.net", "pointer@s.whatsapp.net", "nulltime@s.whatsapp.net", "prepared@s.whatsapp.net"} {
+		if got := stored(jid); got != want {
+			t.Errorf("%s: stored %q, want %q", jid, got, want)
+		}
+	}
+	if got := stored("nilpointer@s.whatsapp.net"); got != "" {
+		t.Errorf("nil *time.Time stored %q, want NULL", got)
+	}
+
+	// The bound side of a comparison gets the same spelling: a local-zone
+	// bound one second later finds the row, one second earlier does not.
+	var n int
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM chats WHERE jid = 'exec@s.whatsapp.net' AND last_message_time < ?`, local.Add(time.Second)).Scan(&n); err != nil || n != 1 {
+		t.Errorf("row before a later local bound: n=%d err=%v", n, err)
+	}
+	if err := ms.db.QueryRow(`SELECT COUNT(*) FROM chats WHERE jid = 'exec@s.whatsapp.net' AND last_message_time < ?`, local.Add(-time.Second)).Scan(&n); err != nil || n != 0 {
+		t.Errorf("row before an earlier local bound: n=%d err=%v", n, err)
+	}
+
+	// Reading is unchanged: the column still scans into a time.Time.
+	var back time.Time
+	if err := ms.db.QueryRow(`SELECT last_message_time FROM chats WHERE jid = 'exec@s.whatsapp.net'`).Scan(&back); err != nil {
+		t.Fatal(err)
+	}
+	if !back.Equal(local.Truncate(time.Second)) {
+		t.Errorf("scanned %v, want %v", back, local.Truncate(time.Second))
+	}
+}
+
+// Every pooled connection of the test store is the same database. With the
+// old `:memory:` store a second connection was a separate, empty database,
+// which is how the receipt worker of #818 met "no such table" on arm64.
+func TestTestMessageStoreConnectionsShareOneDatabase(t *testing.T) {
+	ms := newTestMessageStore(t)
+	held, err := ms.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	if err := ms.StoreChat("5511999999999@s.whatsapp.net", "Alice", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := held.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM chats`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("second connection: n=%d err=%v", n, err)
 	}
 }
