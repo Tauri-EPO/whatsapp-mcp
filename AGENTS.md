@@ -271,7 +271,7 @@ Rules that stay true across all steps:
   - `git reset --hard`, `git checkout <other-branch>` and `git clean` belong to the directory you created. Elsewhere they wipe uncommitted work that exists nowhere else.
   - The stash stack is shared across worktrees: tag your entries (`git stash push -u -m <tag>`) and restore them by hash (`git stash apply <sha>`). Bare `git stash pop` takes whatever another session pushed last.
   - Give a review subagent your worktree path as its target; it otherwise starts in the coordinator's checkout and reviews the wrong diff.
-  - Run the Docker-based Go gates (§5) one session at a time **with the default commands**: every one of them mounts the same host Go module cache, and `go vet`/`go test` also share the `wamcp-gobuild` build-cache volume. Sessions that run in parallel use the per-session variant in §5 ("Several sessions at once") instead, with their own module-cache and build-cache volumes. The gofmt LF copy is already per worktree and needs no such care.
+  - Run the Docker-based Go gates (§5) one session at a time **with the default commands**: every one of them mounts the same host Go module cache, and `go vet`/`go test` also share the `wamcp-gobuild` build-cache volume. Sessions that run in parallel use the per-session variant in §5 ("Several sessions at once") instead, with their own module-cache and build-cache volumes.
   - After a crash, confirm the worktree still exists (`git worktree list`) before running anything in it.
 - **No new top-level dependencies** without a sentence of justification in the PR.
 - **Fake identifiers only.** The repository is public: examples, docstrings and fixtures use made-up phone numbers, JIDs, LIDs, names and hosts (`5511999999999`, `120363000000000001@g.us`, `example.ts.net`, Alice/Bob), never a value copied from a live archive. `whatsapp-mcp-server/tests/test_fake_identifiers.py` fails the Python job on a `55`-prefixed number, a user or group JID or a `*.ts.net` host that is not on its allow-list; a new fake is added there in the same PR (the failure does not print the value). A public list of common first names also checks decoded literals in Go/Python tests and serialized fixtures against reviewed fakes (Alice/Bob/Carol/Dave/Eve and John Doe/Jane Doe), without printing a rejected value. This is a heuristic, not a private contact list: arbitrary names still require review; never add a private name to the list.
@@ -332,25 +332,15 @@ docker run --rm -v "$PWD/whatsapp-bridge:/src" -v "$USERPROFILE/go/pkg/mod:/go/p
   -w /src golangci/golangci-lint:v2.14.0 golangci-lint run
 ```
 
-**gofmt on Windows.** `golangci-lint run` fails on a file `gofmt` would rewrite (the `gofmt` formatter in `.golangci.yml`), and `gofmt` also rewrites line endings — so running it on this CRLF working copy reports every file and would commit whole-file churn. Check it on an LF copy of the tree instead, and apply what it reports with an editor, not with `gofmt -w` on the working copy. The copy goes to a directory named after the worktree and is rebuilt from scratch on every run, so two worktrees side by side never share it and a file deleted or renamed in the branch cannot be linted from an earlier run:
+**gofmt.** `golangci-lint run` fails on a file `gofmt` would rewrite (the `gofmt` formatter in `.golangci.yml`). `.gitattributes` checks every `*.go` file out with LF on every platform, so `gofmt` runs on the working copy itself, Windows included:
 
 ```bash
-# LF copy of the working tree (committed, modified and new-but-untracked files; .gitignore respected),
-# in a directory Docker Desktop can mount (not /tmp), one per worktree
-LF="../lf-check-$(basename "$PWD")" && rm -rf "$LF" && mkdir -p "$LF"
-git ls-files -z --cached --others --exclude-standard whatsapp-bridge | while IFS= read -r -d '' f; do
-  [ -e "$f" ] && mkdir -p "$LF/$(dirname "$f")" && tr -d '\r' < "$f" > "$LF/$f"; done
-if [ -f "$LF/whatsapp-bridge/go.mod" ]; then
-  MSYS_NO_PATHCONV=1 docker run --rm -v "$(cd "$LF" && pwd -W)/whatsapp-bridge:/src" \
-    -w /src golang:1.27-alpine gofmt -s -l .
-else echo "the LF copy is empty: run this from the repository root"; fi
+MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W)/whatsapp-bridge:/src" -w /src golang:1.27-alpine gofmt -s -l .
 ```
 
-The copy strips every CR from every file under `whatsapp-bridge/`, which is right while they are all text; a binary fixture added there later would need to be excluded. Delete `../lf-check-*` when the worktree goes away.
+A worktree created before that attribute still holds CRLF `.go` files and gets every file listed: in a clean tree, `git ls-files -z '*.go' | xargs -0 rm -f && git checkout -- '*.go'` rewrites them with LF (git sees no change: the committed blobs were always LF).
 
-(`[ -e "$f" ]` skips a tracked file you deleted and have not committed yet. To check exactly what is committed, use `git -c core.autocrlf=false -c core.eol=lf archive --format=tar HEAD whatsapp-bridge | tar -x -C "$LF"` instead of the loop.)
-
-**Several sessions at once.** The commands above share the host module cache and the `wamcp-gobuild` volume, so two sessions at the same time would write the same cache. Give each session its own two volumes (the LF directory is already per worktree) and nothing is shared; `$S` is any name unique to the session:
+**Several sessions at once.** The commands above share the host module cache and the `wamcp-gobuild` volume, so two sessions at the same time would write the same cache. Give each session its own two volumes and nothing is shared; `$S` is any name unique to the session:
 
 ```bash
 S=mylane
@@ -370,7 +360,7 @@ The price is a cold module download the first time a session uses its volumes; r
 
 `git diff --stat` after the edit must show only the hunks gofmt asked for. Note that gofmt reformats doc comments too, and turns a `''` in one into a typographic `”`: reword the comment rather than commit the curly quote.
 
-Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.sh` and `Dockerfile` are forced LF by `.gitattributes`. When editing files programmatically, read with universal newlines and write `\n`. Prefer writing whole files or line-anchored edits over shell heredocs containing backslash escapes.
+Working-copy files are CRLF (`core.autocrlf=true`); commits are LF. `*.go`, `*.sh` and `Dockerfile` are forced LF by `.gitattributes`. When editing files programmatically, read with universal newlines and write `\n`. Prefer writing whole files or line-anchored edits over shell heredocs containing backslash escapes.
 
 ## 6. CI gates
 
@@ -379,7 +369,7 @@ Every PR runs `.github/workflows/ci.yml` and `security.yml` (a newer push cancel
 | Job | What |
 |---|---|
 | Python Lint | `uv sync --frozen --extra dev`, `ruff check`, `ruff format --check`, `pyright` (basic mode, `tests/` excluded: they use duck-typed fakes), `pytest` (one job, one toolchain setup) |
-| Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.14.0 with `whatsapp-bridge/.golangci.yml`: linters `errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`, `nolintlint` and the `gofmt` formatter (an unformatted file fails the job — see §5 for checking it from a CRLF checkout). Suppress a finding only with `//nolint:<linter> // <why>` on the line; `nolintlint` rejects a bare `//nolint`, a directive without a reason, and one that no longer silences anything, so delete a suppression once its finding is gone |
+| Go Build | `go build`, `go vet`, `go test` (again under `TZ=America/Sao_Paulo`), `go test -race` as its own step, then golangci-lint v2.14.0 with `whatsapp-bridge/.golangci.yml`: linters `errcheck`, `govet`, `ineffassign`, `unused`, `staticcheck`, `gosec`, `misspell`, `nolintlint` and the `gofmt` formatter (an unformatted file fails the job — §5 shows the local check). Suppress a finding only with `//nolint:<linter> // <why>` on the line; `nolintlint` rejects a bare `//nolint`, a directive without a reason, and one that no longer silences anything, so delete a suppression once its finding is gone |
 | CodeQL (Python, Go) | security scanning on PRs and weekly on `main`; `"host" in list` style asserts trip `py/incomplete-url-substring-sanitization`, use set comparisons in tests |
 | Bandit | Bandit **1.9.4** fails its job on production medium/high findings and on test findings except fixture IDs B104, B108, B310 and B608. Production targets are explicit top-level `.py` files; tests have a separate recursive scan with those four skips (three B103 permission fixtures are individually justified). The summary reports real scanner exits, finding details and scan errors; incomplete reports also fail. Reviewed suppressions name the test ID and explain the specific construction |
 | pip-audit, govulncheck, Trivy image scan | `continue-on-error`; read the output anyway. Trivy scans the freshly built images on PRs and the published `:main` tags weekly (HIGH/CRITICAL, fixed only); a green job is not a clean scan: the outcome line and full table are in the log, the job summary and the `trivy-<component>` artifact (`gh run download <run> -n trivy-server`, 30 days) |
