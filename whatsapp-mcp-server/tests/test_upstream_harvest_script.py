@@ -17,6 +17,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -316,6 +317,22 @@ def test_a_failing_gh_is_said_keeps_the_timestamp_and_still_records_the_head(mar
     assert marked.mark("upstream") == [late, GH_STAMP]
 
 
+def _git_runtime_path() -> str:
+    """The resolved git's own runtime directories, as the bash under test
+    spells them: its MSYS prefix's bin (mingw64, clangarm64, mingw32...) and
+    the install's usr/bin, which a local `git fetch` also needs."""
+    assert GIT is not None and BASH is not None
+    exec_path = Path(subprocess.run([GIT, "--exec-path"], capture_output=True, text=True, check=True).stdout.strip())
+    prefix = exec_path.parents[1]  # <root>/<prefix>/libexec/git-core
+    dirs = [prefix / "bin", prefix.parent / "usr" / "bin"]
+    return subprocess.run(
+        [BASH, "-c", 'cygpath -u -p "$1"', "cygpath", ";".join(str(d) for d in dirs)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 def test_without_gh_the_commits_are_listed_and_the_timestamp_stays(marked: Harvest) -> None:
     # PATH holds git and nothing else: no gh, and no awk, sed or grep either,
     # which the script must not need.
@@ -323,7 +340,13 @@ def test_without_gh_the_commits_are_listed_and_the_timestamp_stays(marked: Harve
     only_git = marked.root / "only-git"
     only_git.mkdir()
     wrapper = only_git / "git"
-    wrapper.write_text(f'#!/bin/sh\nexec "{Path(GIT).as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
+    # Git for Windows' own fetch needs its runtime directories on PATH, or
+    # `git fetch` segfaults (issue #859). They go on git's PATH only, inside
+    # the wrapper: the script under test still sees only-git. On Windows that
+    # means git's own children (hooks, aliases) can reach the MSYS userland,
+    # so there the check covers the script's direct calls only.
+    git_path = f'PATH="{_git_runtime_path()}:$PATH" ' if sys.platform == "win32" else ""
+    wrapper.write_text(f'#!/bin/sh\n{git_path}exec "{Path(GIT).as_posix()}" "$@"\n', encoding="utf-8", newline="\n")
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     late = marked.commit(marked.up, "whatsapp-bridge/late.go", "up: later")
 
