@@ -34,8 +34,6 @@ import (
 	"math"
 	"strings"
 	"time"
-
-	"modernc.org/sqlite"
 )
 
 // dbTimeLayout is the canonical on-disk spelling. Values are always rendered
@@ -57,18 +55,21 @@ func dbTime(t time.Time) string {
 // write site was the rule, and a site that bound the raw value still wrote
 // the value's own offset (issue #270, then d458e0d and 9a651ab): the
 // connection now does it, so a raw time.Time and dbTime(t) store the same
-// text, and a bound used in a comparison is spelled like the column.
-// Reading is unchanged: a scanned TIMESTAMP column still parses into a
-// time.Time through _time_format=sqlite.
+// text, and a bound used in a comparison is spelled like the column. Like
+// dbTime, it keeps whole seconds: a raw bound of 20:10:08.5 compares as
+// 20:10:08. Reading is unchanged: a scanned TIMESTAMP column still parses
+// into a time.Time through _time_format=sqlite.
+//
+// base comes from sqlite.NewConnector, so connections are the package-level
+// driver's, with whatever functions or hooks are registered on it.
 type canonicalTimeConnector struct {
-	dsn    string
-	driver *sqlite.Driver
+	base driver.Connector
 }
 
-func (c canonicalTimeConnector) Driver() driver.Driver { return c.driver }
+func (c canonicalTimeConnector) Driver() driver.Driver { return c.base.Driver() }
 
-func (c canonicalTimeConnector) Connect(context.Context) (driver.Conn, error) {
-	conn, err := c.driver.Open(c.dsn)
+func (c canonicalTimeConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.base.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +81,9 @@ func (c canonicalTimeConnector) Connect(context.Context) (driver.Conn, error) {
 	return canonicalTimeConn{full}, nil
 }
 
-// sqliteConn is what database/sql asks of a modernc.org/sqlite connection.
-// Embedding it keeps every optional method visible through the wrapper.
+// sqliteConn is what database/sql asks of a modernc.org/sqlite connection
+// (the optional interfaces its NewConnector documentation says a wrapper must
+// forward). Embedding it keeps them visible through the wrapper.
 type sqliteConn interface {
 	driver.Conn
 	driver.ConnBeginTx
@@ -95,9 +97,14 @@ type sqliteConn interface {
 
 type canonicalTimeConn struct{ sqliteConn }
 
+// Unwrap returns the driver's own connection, for conn.Raw callers that need
+// a modernc-specific method and for the driver's helpers that look through
+// wrappers.
+func (c canonicalTimeConn) Unwrap() driver.Conn { return c.sqliteConn }
+
 // CheckNamedValue runs before the driver sees an argument (the driver has no
-// checker of its own, so this one applies to Exec, Query and prepared
-// statements alike). It does the conversion database/sql would do without
+// checker of its own, which TestSQLiteDriverHasNoNamedValueChecker pins, so
+// this one applies to Exec, Query and prepared statements alike). It does the conversion database/sql would do without
 // it (driver.Valuer such as sql.NullTime, pointers, named types), then
 // renders a resulting time.Time with dbTime.
 func (canonicalTimeConn) CheckNamedValue(nv *driver.NamedValue) error {

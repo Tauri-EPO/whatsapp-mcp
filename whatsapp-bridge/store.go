@@ -57,8 +57,10 @@ func NewMessageStore() (*MessageStore, error) {
 	// history-sync burst used to make readers hit SQLITE_BUSY), and the busy
 	// timeout makes both sides wait instead of failing on a short lock.
 	privateDatabase(messagesDBPath())
-	db := openMessagesDB(messagesDBPath())
-	var err error
+	db, err := openMessagesDB(messagesDBPath())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open message database: %v", err)
+	}
 
 	// Create tables if they don't exist
 	_, err = db.Exec(`

@@ -100,8 +100,12 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 		t.Fatal("messagesWriterOptions no longer enables foreign keys where the test store expects")
 	}
 	options += "&_pragma=synchronous(OFF)"
-	db := openMessagesDBWithOptions(filepath.Join(t.TempDir(), "messages.db"), options)
-	_, err := db.Exec(`
+	db, err := openMessagesDBWithOptions(filepath.Join(t.TempDir(), "messages.db"), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`
 		CREATE TABLE chats (
 			jid TEXT PRIMARY KEY,
 			name TEXT,
@@ -169,7 +173,6 @@ func newTestMessageStore(t testing.TB) *MessageStore {
 	if err != nil {
 		t.Fatalf("failed to create tables: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 	if _, err := db.Exec(pendingEditsSchema); err != nil {
 		t.Fatal(err)
 	}

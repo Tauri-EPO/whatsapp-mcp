@@ -3,16 +3,72 @@ package main
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
 )
+
+// A store path with "#", "?" or "%" opens that very file with its options.
+// Unescaped, "#" started a URI fragment: a test subdirectory named "...#01"
+// truncated the path to a file shared across runs, without WAL or pragmas.
+func TestSQLiteURIOpensPathsWithURIDelimiters(t *testing.T) {
+	names := []string{"hash#01", "percent%41", "space and+plus"}
+	if runtime.GOOS != "windows" {
+		names = append(names, "question?mark")
+	}
+	for _, name := range names {
+		dir := filepath.Join(t.TempDir(), name)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "messages.db")
+		db, err := openMessagesDB(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mode string
+		if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		_ = db.Close()
+		if mode != "wal" {
+			t.Errorf("%s: journal_mode=%q, want wal (DSN options lost)", name, mode)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s: database not at its path: %v", name, err)
+		}
+	}
+}
+
+// The connector's CheckNamedValue would shadow one the driver added in a
+// later release; this fails first, so the connector can delegate to it.
+func TestSQLiteDriverHasNoNamedValueChecker(t *testing.T) {
+	base, err := sqlite.NewConnector(sqliteURI(filepath.Join(t.TempDir(), "probe.db"), ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := base.Connect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, ok := conn.(driver.NamedValueChecker); ok {
+		t.Fatal("modernc.org/sqlite connections now check named values: make canonicalTimeConn delegate to that checker")
+	}
+	if _, ok := conn.(sqliteConn); !ok {
+		t.Fatal("modernc.org/sqlite connections no longer implement sqliteConn")
+	}
+}
 
 // Every production sql.Open or sql.OpenDB must be followed by an explicit pool
 // bound, or a burst opens one connection per goroutine (issue #471).
@@ -49,13 +105,16 @@ func TestEverySQLOpenIsFollowedByAPoolBound(t *testing.T) {
 }
 
 // messages.db is written only through openMessagesDB, whose connection stores
-// a bound time.Time in dbTime's spelling. A handle opened with the writer
-// options anywhere else would bring back the raw driver rendering.
+// a bound time.Time in dbTime's spelling. A writer handle opened anywhere else
+// (the messages writer options, or the store path with any writer options)
+// would bring back the raw driver rendering. Read-only handles, such as the
+// operator archive's, write nothing and are not checked.
 func TestMessagesDBIsOpenedOnlyThroughOpenMessagesDB(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	definition := regexp.MustCompile(`^messagesWriterOptions\s*=`)
 	uses := 0
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -66,11 +125,15 @@ func TestMessagesDBIsOpenedOnlyThroughOpenMessagesDB(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i, line := range strings.Split(string(raw), "\n") {
-			if !strings.Contains(line, "messagesWriterOptions") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") || definition.MatchString(trimmed) {
 				continue
 			}
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "messagesWriterOptions =") {
+			if strings.Contains(line, "messagesDBPath()") && strings.Contains(line, "WriterOptions") {
+				t.Errorf("%s:%d: open messages.db with openMessagesDB (store_dir.go), which stores bound times in dbTime's spelling", name, i+1)
+				continue
+			}
+			if !strings.Contains(line, "messagesWriterOptions") {
 				continue
 			}
 			uses++
