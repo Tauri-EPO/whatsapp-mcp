@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.14.2](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.14.1...v2.14.2) (2026-11-23)
+
+
+### Bug fixes
+
+* make repeated agent mistakes unwritable (LF Go files, canonical bound times, one-database test store) ([#860](https://github.com/Tauri-EPO/whatsapp-mcp/issues/860)) ([ef2e7e9](https://github.com/Tauri-EPO/whatsapp-mcp/commit/ef2e7e975e7318520e3a4b08415aa5d37ed3370c))
+
 ## [2.14.1](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.14.0...v2.14.1) (2026-11-21)
 
 
