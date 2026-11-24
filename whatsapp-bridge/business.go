@@ -52,7 +52,25 @@ func (c *businessCache) clock() time.Time {
 // Only answers are cached, never policy decisions. Partial answers retain their
 // errors on cache hits so a rate limit cannot turn an unknown into a person.
 func (c *businessCache) lookup(ctx context.Context, client businessClient, jid types.JID) businessResult {
+	if result, ok := c.fresh(client, jid); ok {
+		return result
+	}
+	info, userErr := client.GetUserInfo(ctx, []types.JID{jid})
+	return c.storeLookup(ctx, client, jid, info, userErr)
+}
+
+// lookupFromUser reuses one GetUserInfo the caller already made. A fresh cache
+// hit still wins, so a rate-limited entry cannot be replaced by a later guess.
+func (c *businessCache) lookupFromUser(ctx context.Context, client businessClient, jid types.JID, info map[types.JID]types.UserInfo, userErr error) businessResult {
+	if result, ok := c.fresh(client, jid); ok {
+		return result
+	}
+	return c.storeLookup(ctx, client, jid, info, userErr)
+}
+
+func (c *businessCache) fresh(client businessClient, jid types.JID) (businessResult, bool) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	// A replaced session must never reuse metadata queried by another account.
 	if c.client != client {
 		c.entries = nil
@@ -60,13 +78,14 @@ func (c *businessCache) lookup(ctx context.Context, client businessClient, jid t
 	}
 	entry, ok := c.entries[jid]
 	if ok && c.clock().Before(entry.expires) {
-		c.mu.Unlock()
 		entry.result.Cached = true
-		return entry.result
+		return entry.result, true
 	}
-	c.mu.Unlock()
+	return businessResult{}, false
+}
+
+func (c *businessCache) storeLookup(ctx context.Context, client businessClient, jid types.JID, info map[types.JID]types.UserInfo, userErr error) businessResult {
 	result := businessResult{Success: true, JID: jid.String(), Categories: []string{}}
-	info, userErr := client.GetUserInfo(ctx, []types.JID{jid})
 	if userErr != nil {
 		result.VerifiedNameError = "verified name lookup failed"
 		var iq *whatsmeow.IQError

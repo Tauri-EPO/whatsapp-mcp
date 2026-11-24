@@ -77,6 +77,7 @@ func invalidStartupValues() map[string]string {
 		groupRosterSyncEnv: "-1", sessionKeepaliveEnv: "169", mediaMaxBytesEnv: "50MB",
 		"WHATSAPP_MEDIA_ROOTS": "relative/outbox", "WHATSAPP_BRIDGE_TOKEN": "tiny-secret",
 		statusRetentionEnv: "-1", purgeStatusOnStartEnv: "typo", mediaQuotaEnv: "-1", mediaEvictTypesEnv: "unknown", mediaEvictTargetEnv: "100",
+		profileUnknownEnv: "-1",
 	}
 }
 

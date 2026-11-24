@@ -28,6 +28,7 @@ type bridgeConfig struct {
 	StatusRetention              *time.Duration
 	PurgeStatusOnStart           bool
 	RosterSync, SessionKeepalive time.Duration
+	ProfileUnknownPerHour        int
 	ReadOnly                     readOnlyPolicy
 	Tools                        toolPolicy
 	RuntimeDefaults              map[string]runtimeSetting
@@ -106,6 +107,8 @@ func parseBridgeConfigNetwork(getenv func(string) string,
 	cfg.RosterSync, err = resolveGroupRosterSync(getenv(groupRosterSyncEnv))
 	collect(err)
 	cfg.SessionKeepalive, err = resolveSessionKeepalive(getenv(sessionKeepaliveEnv))
+	collect(err)
+	cfg.ProfileUnknownPerHour, err = resolveProfileUnknownPerHour(getenv(profileUnknownEnv))
 	collect(err)
 	cfg.ReadOnly, err = parseReadOnly(getenv(readOnlyEnv))
 	collect(err)

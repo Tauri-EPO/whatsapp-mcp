@@ -38,6 +38,8 @@ type Bridge struct {
 	peerReceiptDone            chan struct{}
 	peerReceiptProcessed       func() // Tests observe completion before reading SQLite.
 	businessProfiles           businessCache
+	profiles                   profileCache
+	ProfileUnknownPerHour      int
 	ProxyEnabled               bool
 	forceReconnect             atomic.Bool
 	connectionEventsMu         sync.Mutex
@@ -369,6 +371,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		storeStats:     newStoreStats(storeRoot),
 		metrics:        newMetricsRegistry(),
 	}
+	b.ProfileUnknownPerHour = defaultProfileUnknownPerHour
 	b.mediaRetryCooldown = newMediaRetryCooldown()
 	b.LabelResyncTimeout = actionDeadline
 	b.LabelResync = func(ctx context.Context) error {

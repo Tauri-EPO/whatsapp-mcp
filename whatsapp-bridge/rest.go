@@ -160,6 +160,18 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	mux.HandleFunc("/api/group/create", mutate(requireMethod(http.MethodPost, handleCreateGroup(creation))))
 	mux.HandleFunc("/api/group/subgroups", auth(requireMethod(http.MethodGet, handleSubGroups(creation))))
 	mux.HandleFunc("/api/business", auth(requireMethod(http.MethodGet, handleCheckBusiness(client, &b.businessProfiles, b.Policy, b.Connected))))
+	mux.HandleFunc("/api/profile", auth(requireMethod(http.MethodGet, handleGetProfile(profileDeps{
+		client: client, business: &b.businessProfiles, profiles: &b.profiles,
+		policy: b.Policy, connected: b.Connected, onWhatsApp: b.IsOnWhatsApp,
+		store: messageStore, root: b.StoreRoot, account: func() *types.JID {
+			current := b.currentClient()
+			if current == nil || current.Store == nil {
+				return nil
+			}
+			return current.Store.ID
+		},
+		limit: b.ProfileUnknownPerHour, maxBytes: b.MediaMaxBytes, download: downloadProfilePicture,
+	}))))
 
 	// Delete a message: revoke for everyone (own messages) or drop the local
 	// row only. See delete_message.go.

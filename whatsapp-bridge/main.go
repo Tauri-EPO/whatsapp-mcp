@@ -316,6 +316,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	bridge.RESTSplit = cfg.SplitREST
 	bridge.MediaRetention, bridge.MediaAutoDownloadStatus = cfg.MediaRetention, cfg.StatusMedia
 	bridge.GroupRosterSync, bridge.SessionKeepalive = cfg.RosterSync, cfg.SessionKeepalive
+	bridge.ProfileUnknownPerHour = cfg.ProfileUnknownPerHour
 	bridge.ReadOnly, bridge.Tools = cfg.ReadOnly, cfg.Tools
 	bridge.RuntimeDefaults = cfg.RuntimeDefaults
 	bridge.SendIncludeActions, bridge.MCPEnvHash = cfg.SendIncludeActions, cfg.MCPEnvHash
