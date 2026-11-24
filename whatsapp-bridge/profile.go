@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -496,11 +497,14 @@ func saveProfilePicture(ctx context.Context, deps profileDeps, jid types.JID, ra
 }
 
 func profilePictureLimit(maxBytes uint64) int64 {
-	limit := int64(profilePictureMaxBytes)
-	if maxBytes > 0 && maxBytes < uint64(limit) {
-		return int64(maxBytes) //nolint:gosec // maxBytes is below profilePictureMaxBytes, which fits in int64
+	// A zero ceiling means the deployment set no media cap, so the picture cap
+	// applies. Anything that does not fit in int64, or is at least the picture
+	// cap, uses that same cap. The range check is what makes the conversion
+	// of the remaining value defined.
+	if maxBytes == 0 || maxBytes > uint64(math.MaxInt64) || maxBytes >= profilePictureMaxBytes {
+		return profilePictureMaxBytes
 	}
-	return limit
+	return int64(maxBytes)
 }
 
 func storeProfilePicture(root *os.Root, chat types.JID, now time.Time, data []byte) (string, error) {
