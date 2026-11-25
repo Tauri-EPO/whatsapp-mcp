@@ -12,7 +12,7 @@ reason: "quota"` and a subsequent read streams without retaining a cache copy.
 Local paths keep their existing behavior. See
 [Media storage backends](CONFIGURATION.md#media-storage-backends).
 
-With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `reset_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `test_webhook` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
+With `WHATSAPP_READ_ONLY=1` the mutating tools on this page — `send_message`, `send_file`, `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`, `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`, `create_group`, `manage_group_participants`, `update_group`, `get_group_invite_link`, `reset_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `test_webhook`, `set_profile_photo`, `remove_profile_photo`, `set_about`, `set_display_name` — are not offered at all: they are omitted from `tools/list`, refused with `denied` if called anyway, and the bridge answers `403` on the matching endpoints. Everything else keeps working, including `read_media`, `download_media`, `transcribe_audio` and the media notes. See [Read-only mode](CONFIGURATION.md#read-only-mode-recommended-for-a-personal-assistant).
 
 `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` cut the same way by name: the allow-list is exhaustive (only what it names is offered), the deny-list wins over it, and read-only wins over both. The names to use are the tool names on this page. Both variables go to both processes: the bridge maps the names to the endpoints those tools call and answers `403` on the rest. See [Per-tool allow/deny](CONFIGURATION.md#per-tool-allowdeny).
 
@@ -1251,6 +1251,26 @@ Revoke the group's invite link and create a new one (admin only); the old link s
 ### `leave_group`
 
 Leave a group. Irreversible without a new invite; the local archive keeps the history. **Parameters:** `chat_jid`.
+
+### Own profile
+
+These four tools change the paired account itself. They ship in 2.15.0. Each is a write (`openWorldHint` true, not destructive), so `WHATSAPP_READ_ONLY` and `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` can turn them off one by one. A WhatsApp `429` comes back as `rate_limited`: report it and do not retry. There is no retry loop.
+
+### `set_profile_photo`
+
+Replace this account's profile photo. **Parameters:** `path`, an absolute path to a JPEG or PNG in the same directories `send_file` uses (`WHATSAPP_MEDIA_ROOTS`). The bridge center-crops the image to a square and uploads a 640×640 JPEG, at most 512 KiB. Files larger than 8 MiB, or with an edge longer than 4096 pixels, are refused before anything is sent. Returns `picture_id`.
+
+### `remove_profile_photo`
+
+Remove this account's profile photo. No parameters. Returns `removed: true`.
+
+### `set_about`
+
+Set the About text shown on the profile (not a status post). **Parameters:** `text`, at most 139 characters; an empty string clears it. Control and bidi characters are refused.
+
+### `set_display_name`
+
+Set this account's push name, the name shown for this linked device. **Parameters:** `name`, 1 to 25 characters. This is the app-state push name. It is not the name saved in someone else's contacts and not a business verified name. It needs app-state keys the phone has already synced, and the phone can overwrite it later. A missing key is a bridge error, not a reason to send the name again.
 
 ### `archive_chat`
 

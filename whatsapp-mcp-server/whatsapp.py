@@ -4751,6 +4751,16 @@ def _bridge_json(response) -> dict[str, Any]:
     return payload
 
 
+def _profile_change_json(response) -> dict[str, Any]:
+    """One own-profile write. A 429 is rate_limited and is not retried."""
+    if getattr(response, "status_code", None) == 429:
+        raise ToolError(
+            "rate_limited",
+            "WhatsApp rate limited this profile change; report it instead of retrying",
+        )
+    return _bridge_json(response)
+
+
 def _bridge_media_json(response, message_id: str, chat_jid: str) -> dict[str, Any]:
     """Remember per-row refusals for every manual or background media fetch."""
     import media_notes
@@ -7743,6 +7753,29 @@ def leave_group(group_jid: str) -> dict[str, Any]:
     """Leave the group (irreversible without a new invite)."""
     jid = _group_jid(group_jid)
     return _bridge_json(_bridge_request("POST", "/group/leave", json={"group_jid": jid}))
+
+
+def set_profile_photo(path: str) -> dict[str, Any]:
+    """Replace this account's profile photo. The bridge crops and re-encodes the file."""
+    media_path = (path or "").strip()
+    if not media_path:
+        raise ToolError("invalid_argument", "path is required")
+    return _profile_change_json(_bridge_request("POST", "/profile/photo", json={"path": media_path}))
+
+
+def remove_profile_photo() -> dict[str, Any]:
+    """Remove this account's profile photo."""
+    return _profile_change_json(_bridge_request("POST", "/profile/photo/remove", json={}))
+
+
+def set_about(text: str) -> dict[str, Any]:
+    """Set this account's About text. An empty string clears it."""
+    return _profile_change_json(_bridge_request("POST", "/profile/about", json={"text": text}))
+
+
+def set_display_name(name: str) -> dict[str, Any]:
+    """Set this account's push name through the app-state critical block."""
+    return _profile_change_json(_bridge_request("POST", "/profile/name", json={"name": name}))
 
 
 def archive_chat(chat_jid: str, archived: bool = True) -> dict[str, Any]:

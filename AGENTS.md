@@ -128,6 +128,7 @@ whatsapp-mcp/
 │   ├── health.go               # /api/health (liveness + compact runtime webhook), /api/ready (readiness)
 │   ├── version.go              # GET /api/version: build identity injected by ldflags
 │   ├── me.go                   # GET /api/me: the account's own phone JID and LID (authenticated)
+│   ├── own_profile.go          # paired account profile photo, about text and push name
 │   ├── chat_actions.go         # /api/react, /api/typing
 │   ├── mark_read.go            # /api/mark-read: listed IDs, or the whole chat up to a timestamp
 │   ├── labels.go               # cached Business labels, chat associations, REST endpoints and startup sync
@@ -570,6 +571,7 @@ Compose-only proxy knobs: `WHATSAPP_PROXY_NETWORK` (default `proxy`) names an ex
 | Change how tool results are marked as untrusted | `whatsapp-mcp-server/untrusted.py` (+ the allow-list in `tests/test_untrusted_content.py`) |
 | Change voice-note transcription | `whatsapp-mcp-server/transcribe.py`; the whisper server itself is not in the repo (`docs/DOCKER.md` shows how to run one next to the stack) |
 | Add a bridge REST endpoint | new `whatsapp-bridge/<feature>.go` with `handleX(deps…) http.HandlerFunc`, register in `newRESTMux` (`rest.go`) wrapped in `auth(requireMethod(...))`, fail with `writeError` (never `http.Error`), tests with fakes |
+| Change the paired account's own profile | `whatsapp-bridge/own_profile.go`, `whatsapp-mcp-server/whatsapp.py`, `whatsapp-mcp-server/main.py` |
 | Change Business label caching / chat labelling | `whatsapp-bridge/labels.go`, `events.go`, `whatsapp-mcp-server/whatsapp.py` |
 | Change inbound event handling | `handleEvent` / `handleMessage` in `events.go`, `handleHistorySync` in `history_sync.go`; content extraction in `content.go` |
 | Change the messages schema | `ensureMessageStoreSchema` in `store.go`; migrations idempotent (`ensureColumn`, row backfills, and independent named `schema_migrations` markers via `migration_markers.go`; use `applyNamedMigration` to commit a one-off rewrite and its marker in the same transaction; timestamps explicitly record completion after bounded idempotent chunks; never gate a rewrite on legacy `user_version`); FTS in `fts.go` |

@@ -133,6 +133,10 @@ EXPECTED_TRUSTED = {
     "get_group_invite_link",
     "reset_group_invite_link",
     "leave_group",
+    "set_profile_photo",
+    "remove_profile_photo",
+    "set_about",
+    "set_display_name",
 }
 
 

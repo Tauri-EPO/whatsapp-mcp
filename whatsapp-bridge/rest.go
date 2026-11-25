@@ -177,6 +177,25 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 		b.allowSendAction,
 	)))
 
+	// The paired account's own profile (see own_profile.go). Each path is its
+	// own tool so a deny-list can turn one of them off without the others.
+	profile := bindOwnProfile(client, b.Connected, func() bool {
+		return client != nil && client.IsLoggedIn()
+	}, b.sendAppState, func(ctx context.Context, name string) error {
+		if client == nil || client.Store == nil {
+			return nil
+		}
+		client.Store.PushName = name
+		if err := client.Store.Save(ctx); err != nil && b.Log != nil {
+			b.Log.Warnf("profile: push name reached WhatsApp but the local device store was not saved: %v", err)
+		}
+		return nil
+	})
+	mux.HandleFunc("/api/profile/photo", mutate(requireMethod(http.MethodPost, handleSetProfilePhoto(profile, allowedMediaRoots))))
+	mux.HandleFunc("/api/profile/photo/remove", mutate(requireMethod(http.MethodPost, handleRemoveProfilePhoto(profile))))
+	mux.HandleFunc("/api/profile/about", mutate(requireMethod(http.MethodPost, handleSetAbout(profile))))
+	mux.HandleFunc("/api/profile/name", mutate(requireMethod(http.MethodPost, handleSetDisplayName(profile))))
+
 	// Poll results (see polls.go).
 	mux.HandleFunc("/api/poll", auth(handlePollResults(messageStore, b.Policy)))
 
