@@ -5363,6 +5363,30 @@ def check_business(jid: str) -> dict[str, Any]:
     return _bridge_json(_bridge_request("GET", "/business", params={"jid": jid}))
 
 
+def get_profile(jid: str) -> dict[str, Any]:
+    """Read one live profile. The allow-list is checked before the bridge, and again on the resolved JID."""
+    raw = normalize_recipient((jid or "").strip())
+    if not raw:
+        raise ToolError("invalid_argument", "jid is required")
+    if "@" in raw:
+        user, _, server = raw.rpartition("@")
+        server = server.lower()
+        if not user or "@" in user or ":" in user or "." in user or server not in {"s.whatsapp.net", "lid"}:
+            raise ToolError("invalid_argument", "jid must be a phone number or a phone/LID user JID")
+        target = f"{user}@{server}"
+        _require_allowed(target)
+    elif raw.isascii() and raw.isdigit() and 7 <= len(raw) <= 15:
+        target = raw
+        _require_allowed(f"{target}@s.whatsapp.net")
+    else:
+        raise ToolError("invalid_argument", "jid must be a phone number or a phone/LID user JID")
+    result = _bridge_json(_bridge_request("GET", "/profile", params={"jid": target}))
+    resolved = str(result.get("jid") or "").strip()
+    if resolved and "@" in resolved:
+        _require_allowed(resolved)
+    return result
+
+
 def get_poll_results(message_id: str, chat_jid: str) -> dict[str, Any]:
     """Tally of a native WhatsApp poll seen by the bridge (question, options, votes)."""
     message_id, chat_jid = (message_id or "").strip(), (chat_jid or "").strip()

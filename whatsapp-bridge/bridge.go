@@ -31,14 +31,20 @@ import (
 type mediaDownloader func(ctx context.Context, messageID, chatJID string) (bool, string, string, string, error)
 
 type Bridge struct {
-	peerReceiptMu              sync.Mutex
-	peerReceiptQueue           chan peerReceiptJob
-	peerReceiptWait            sync.WaitGroup
-	peerReceiptStopped         bool
-	peerReceiptDone            chan struct{}
-	peerReceiptProcessed       func() // Tests observe completion before reading SQLite.
-	businessProfiles           businessCache
-	ProxyEnabled               bool
+	peerReceiptMu         sync.Mutex
+	peerReceiptQueue      chan peerReceiptJob
+	peerReceiptWait       sync.WaitGroup
+	peerReceiptStopped    bool
+	peerReceiptDone       chan struct{}
+	peerReceiptProcessed  func() // Tests observe completion before reading SQLite.
+	businessProfiles      businessCache
+	profiles              profileCache
+	ProfileUnknownPerHour int
+	ProxyEnabled          bool
+	// profileMedia is the WhatsApp media HTTP client when a proxy is
+	// configured. Profile photo downloads use it, so they leave through the
+	// same proxy as other media. Nil means dial the photo directly.
+	profileMedia               *atomic.Pointer[http.Client]
 	forceReconnect             atomic.Bool
 	connectionEventsMu         sync.Mutex
 	connectionEvents           sync.WaitGroup
@@ -369,6 +375,7 @@ func newBridge(client *whatsmeow.Client, store *MessageStore, logger waLog.Logge
 		storeStats:     newStoreStats(storeRoot),
 		metrics:        newMetricsRegistry(),
 	}
+	b.ProfileUnknownPerHour = defaultProfileUnknownPerHour
 	b.mediaRetryCooldown = newMediaRetryCooldown()
 	b.LabelResyncTimeout = actionDeadline
 	b.LabelResync = func(ctx context.Context) error {

@@ -94,6 +94,7 @@ var unenforcedTools = []string{
 	"get_media_stats",
 	"get_message_context",
 	"get_notes",
+	"get_profile",
 	"get_poll_results",
 	"list_labels",
 	"list_chats",

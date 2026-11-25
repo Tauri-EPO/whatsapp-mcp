@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -233,7 +235,8 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	}
 
 	// Create client instance
-	factory = proxyClientFactory(factory, cfg.ProxyURL)
+	var profileMedia atomic.Pointer[http.Client]
+	factory = proxyClientFactory(factory, cfg.ProxyURL, &profileMedia)
 	client := makeRuntimeClient(deviceStore, clientLog, factory)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
@@ -282,6 +285,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 
 	bridge := newBridge(client, messageStore, logger, bridgeToken, storeRoot, cfg.Switches)
 	bridge.clientFactory = factory
+	bridge.profileMedia = &profileMedia
 	bridge.ProxyEnabled = cfg.ProxyURL != nil
 	bridge.MediaQuotaWarnPercent = cfg.MediaBackend.WarnPercent
 	if cfg.MediaBackend.Backend == "s3" {
@@ -316,6 +320,7 @@ func runBridgeWithClientFactory(cfg bridgeConfig, factory runtimeClientFactory) 
 	bridge.RESTSplit = cfg.SplitREST
 	bridge.MediaRetention, bridge.MediaAutoDownloadStatus = cfg.MediaRetention, cfg.StatusMedia
 	bridge.GroupRosterSync, bridge.SessionKeepalive = cfg.RosterSync, cfg.SessionKeepalive
+	bridge.ProfileUnknownPerHour = cfg.ProfileUnknownPerHour
 	bridge.ReadOnly, bridge.Tools = cfg.ReadOnly, cfg.Tools
 	bridge.RuntimeDefaults = cfg.RuntimeDefaults
 	bridge.SendIncludeActions, bridge.MCPEnvHash = cfg.SendIncludeActions, cfg.MCPEnvHash

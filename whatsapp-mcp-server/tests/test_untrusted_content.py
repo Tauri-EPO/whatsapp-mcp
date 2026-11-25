@@ -59,6 +59,7 @@ def plain(payload):
 # Tools whose result can carry message content, contact/group names or notes.
 EXPECTED_UNTRUSTED = {
     "check_business",
+    "get_profile",
     "list_subgroups",
     "list_labels",
     "list_messages",

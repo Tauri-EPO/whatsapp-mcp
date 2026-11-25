@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
@@ -51,11 +52,11 @@ func parseWhatsAppProxy(getenv func(string) string) (*url.URL, error) {
 }
 
 // Wrap the factory so operator restart/logout handoffs retain the same policy.
-func proxyClientFactory(base runtimeClientFactory, proxyURL *url.URL) runtimeClientFactory {
-	return proxyClientFactoryTransport(base, proxyURL, http.DefaultTransport.(*http.Transport))
+func proxyClientFactory(base runtimeClientFactory, proxyURL *url.URL, media *atomic.Pointer[http.Client]) runtimeClientFactory {
+	return proxyClientFactoryTransport(base, proxyURL, http.DefaultTransport.(*http.Transport), media)
 }
 
-func proxyClientFactoryTransport(base runtimeClientFactory, proxyURL *url.URL, transport *http.Transport) runtimeClientFactory {
+func proxyClientFactoryTransport(base runtimeClientFactory, proxyURL *url.URL, transport *http.Transport, media *atomic.Pointer[http.Client]) runtimeClientFactory {
 	if proxyURL == nil {
 		return base
 	}
@@ -69,9 +70,10 @@ func proxyClientFactoryTransport(base runtimeClientFactory, proxyURL *url.URL, t
 			return nil
 		}
 		// The pinned SDK applies this to pre/post-login websocket and media
-		// upload/download only, never to any bridge-owned HTTP client.
-		// net/http's explicit Proxy URL also supports socks5. This avoids the
-		// SDK SOCKS helper retaining ProxyFromEnvironment on its cloned transport.
+		// upload/download. Profile photos use the same media client. Other
+		// bridge-owned clients stay direct. net/http's explicit Proxy URL also
+		// supports socks5. This avoids the SDK SOCKS helper retaining
+		// ProxyFromEnvironment on its cloned transport.
 		client.SetProxy(http.ProxyURL(proxyURL))
 		// Sanitize at the HTTP boundary as well: bridge callers log returned
 		// websocket errors through their own logger, outside the SDK adapter.
@@ -79,6 +81,9 @@ func proxyClientFactoryTransport(base runtimeClientFactory, proxyURL *url.URL, t
 		client.SetPreLoginHTTPClient(h)
 		client.SetWebsocketHTTPClient(h)
 		client.SetMediaHTTPClient(h)
+		if media != nil {
+			media.Store(h)
+		}
 		return client
 	}
 }

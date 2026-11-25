@@ -653,6 +653,11 @@ def _extracted_blocks(path: str, mime: str, max_pages: int) -> tuple[list[Conten
     return blocks, extra
 
 
+# Reserved cache id for a profile photo written by the bridge. It is not a
+# messages row: read_media opens the local file and never asks the CDN.
+PROFILE_PICTURE_ID = "profile-picture"
+
+
 class ResolvedMedia(NamedTuple):
     """What :func:`resolve_media` proved about one message's media."""
 
@@ -661,6 +666,41 @@ class ResolvedMedia(NamedTuple):
     size: int
     sha256: str | None
     filename: str | None
+
+
+def _local_profile_path(chat_jid: str) -> str | None:
+    """The cached profile photo, from the local store even when media is remote."""
+    name = media_inventory.lookup_cached_name(chat_jid, PROFILE_PICTURE_ID, refuse_unsafe=True)
+    if name is None:
+        return None
+    return _in_chat_dir(chat_jid, os.path.join(media_inventory.chat_media_dir(chat_jid), name))
+
+
+def _resolve_profile_picture(
+    chat_jid: str,
+    caller: str,
+    max_bytes: int,
+    as_text: bool,
+    max_edge: int,
+    as_images: bool,
+    as_base64: bool,
+) -> ResolvedMedia:
+    """Open the local profile photo. A missing file is not a CDN download."""
+    path = _local_profile_path(chat_jid)
+    if path is None:
+        raise ToolError("not_found", "no cached profile picture for this chat; call get_profile first")
+    mime = declared_mime("image", None, path)
+    if as_images:
+        media_pdf.require_renderable(mime)
+    elif as_text and not is_text_mime(mime):
+        media_text.require_extractable(mime)
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise ToolError("internal", f"could not stat the cached file: {exc}") from exc
+    if not as_base64:
+        check_size(size, cap(max_bytes, hard_limit(mime, as_text, max_edge, as_images)), mime, caller)
+    return ResolvedMedia(path, mime, size, None, os.path.basename(path))
 
 
 def resolve_media(
@@ -686,6 +726,8 @@ def resolve_media(
     picture is not the size it costs.
     """
     whatsapp._require_allowed(chat_jid)
+    if (message_id or "").strip() == PROFILE_PICTURE_ID:
+        return _resolve_profile_picture(chat_jid, caller, max_bytes, as_text, max_edge, as_images, as_base64)
     media_type, filename, reported, sha256 = _media_row(chat_jid, message_id)
     remote = media_remote.enabled()
     cached = media_remote.lookup(chat_jid, message_id) if remote else None
@@ -917,7 +959,7 @@ def read_media(
     found = resolve_media(
         chat_jid, message_id, max_bytes=max_bytes, as_text=as_text, max_edge=edge, as_images=as_images
     )
-    if media_remote.enabled():
+    if media_remote.enabled() and (message_id or "").strip() != PROFILE_PICTURE_ID:
         with media_remote.local_file(found.path, found.size, found.sha256, cache_only=not offers_download()) as local:
             found = found._replace(
                 path=local,
