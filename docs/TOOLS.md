@@ -1189,16 +1189,16 @@ can still leave receipts missing; an empty result remains inconclusive.
 
 `get_profile(jid)` accepts a phone number (country code, separators allowed) or a phone/LID user JID inside the chat allow-list. The allow-list is checked on the number as typed and again on the JID WhatsApp registers for it.
 
-Returns `on_whatsapp` and the resolved `jid`. `about` / `about_status` (`ok`, `none`, `error`) are the status text. A hidden about is not an error: this client does not receive a privacy code for the text, so a hidden status arrives empty and `about_status` is `none`. `picture_status` is `ok`, `none`, `hidden_by_privacy` or `error`. When it is `ok`, `picture_chat_jid` and `picture_message_id` (`profile-picture`) name a file in the existing media store; open it with `read_media`. That read stays on the local file and does not download from the CDN. The file follows the media retention already configured.
+Returns `on_whatsapp` and the resolved `jid`. `about` / `about_status` (`ok`, `none`, `error`) are the status text. A hidden about is not an error: this client does not receive a privacy code for the text, so a hidden status arrives empty and `about_status` is `none`. `picture_status` is `ok`, `none`, `hidden_by_privacy` or `error`. When it is `ok`, `picture_chat_jid` and `picture_message_id` (`profile-picture`) name a file in the existing media store; open it with `read_media`. That read stays on the local file and does not download from the CDN. The file follows the media retention already configured. A later lookup that reports the photo hidden or not set deletes that file, so `read_media` no longer opens the previous picture. When `WHATSAPP_PROXY_URL` is set, the download uses the same media client as other WhatsApp media.
 
-`verified_name`, `categories`, `email`, `address` and `website` come from the same cache as `check_business`. `push_name` is read from the local contact store only and is never queried; `push_name_source` is `local_store`, and `push_name` is null when the store has none.
+`verified_name` for a phone comes from the registration check. For a LID it is the business name the contact store holds after the user query. `categories`, `email`, `address` and `website` come from the same cache as `check_business`. `push_name` is read from the local contact store only and is never queried; `push_name_source` is `local_store`, and `push_name` is omitted when the store has none.
 
 Complete answers are cached for about an hour (256 people). Partial answers, including a WhatsApp 429, expire after about a minute. `rate_limited` means stop: do not retry that lookup in a loop. Numbers this account has not seen locally are limited per hour (`WHATSAPP_PROFILE_UNKNOWN_PER_HOUR`, default 30, `0` disables). That refusal sets `limit` to `unknown_profile_lookups` and asks the caller to report it to the operator. Cache hits, known chats and a disconnected miss do not count. A hidden photo is not an error. The text fields are untrusted. Available in read-only mode; a live connection is required when the answer is not already cached.
 
 ### `check_business`
 
 `check_business(jid)` accepts a full phone/LID user JID within the chat allow-list.
-Returns `is_business` (null when unknown), `verified_name`, `categories`, `email`,
+Returns `is_business` (null when unknown), `verified_name` (the business name the contact store holds after the user query; that query does not return the name itself), `categories`, `email`,
 `address` and `website` when present. Queries are bounded by the bridge action
 deadline; up to 256 complete answers are cached for one hour, with `cached`
 marking hits. Partial or rate-limited answers expire within one minute;

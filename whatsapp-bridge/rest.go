@@ -159,18 +159,28 @@ func (b *Bridge) newRESTMux(port int, token string) *http.ServeMux {
 	creation := groupCreationDeps{client: client, connected: b.Connected, policy: b.Policy, twin: group.twin, allowSend: b.allowGroupCreation}
 	mux.HandleFunc("/api/group/create", mutate(requireMethod(http.MethodPost, handleCreateGroup(creation))))
 	mux.HandleFunc("/api/group/subgroups", auth(requireMethod(http.MethodGet, handleSubGroups(creation))))
-	mux.HandleFunc("/api/business", auth(requireMethod(http.MethodGet, handleCheckBusiness(client, &b.businessProfiles, b.Policy, b.Connected))))
+	accountJID := func() *types.JID {
+		current := b.currentClient()
+		if current == nil || current.Store == nil {
+			return nil
+		}
+		return current.Store.ID
+	}
+	mux.HandleFunc("/api/business", auth(requireMethod(http.MethodGet, handleCheckBusiness(client, &b.businessProfiles, b.Policy, b.Connected, func(ctx context.Context, jid types.JID) string {
+		return localBusinessName(ctx, messageStore, accountJID(), profileCandidates(ctx, messageStore, jid))
+	}))))
 	mux.HandleFunc("/api/profile", auth(requireMethod(http.MethodGet, handleGetProfile(profileDeps{
 		client: client, business: &b.businessProfiles, profiles: &b.profiles,
 		policy: b.Policy, connected: b.Connected, onWhatsApp: b.IsOnWhatsApp,
-		store: messageStore, root: b.StoreRoot, account: func() *types.JID {
-			current := b.currentClient()
-			if current == nil || current.Store == nil {
-				return nil
+		store: messageStore, root: b.StoreRoot, account: accountJID,
+		limit: b.ProfileUnknownPerHour, maxBytes: b.MediaMaxBytes,
+		download: func(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
+			var media *http.Client
+			if b.profileMedia != nil {
+				media = b.profileMedia.Load()
 			}
-			return current.Store.ID
+			return downloadProfilePicture(ctx, rawURL, limit, media)
 		},
-		limit: b.ProfileUnknownPerHour, maxBytes: b.MediaMaxBytes, download: downloadProfilePicture,
 	}))))
 
 	// Delete a message: revoke for everyone (own messages) or drop the local

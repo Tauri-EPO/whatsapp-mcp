@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,21 +52,33 @@ func (c *businessCache) clock() time.Time {
 
 // Only answers are cached, never policy decisions. Partial answers retain their
 // errors on cache hits so a rate limit cannot turn an unknown into a person.
-func (c *businessCache) lookup(ctx context.Context, client businessClient, jid types.JID) businessResult {
+// nameOf is read after GetUserInfo. The pinned client parses a verified name
+// and stores it as business_name, but the UserInfo it returns leaves
+// VerifiedName empty, so the name has to come from that store.
+func (c *businessCache) lookup(ctx context.Context, client businessClient, jid types.JID, nameOf func(context.Context, types.JID) string) businessResult {
 	if result, ok := c.fresh(client, jid); ok {
 		return result
 	}
-	info, userErr := client.GetUserInfo(ctx, []types.JID{jid})
-	return c.storeLookup(ctx, client, jid, info, userErr)
+	_, userErr := client.GetUserInfo(ctx, []types.JID{jid})
+	name := ""
+	if userErr == nil && nameOf != nil {
+		name = nameOf(ctx, jid)
+	}
+	return c.storeLookup(ctx, client, jid, userErr, name)
 }
 
 // lookupFromUser reuses one GetUserInfo the caller already made. A fresh cache
 // hit still wins, so a rate-limited entry cannot be replaced by a later guess.
-func (c *businessCache) lookupFromUser(ctx context.Context, client businessClient, jid types.JID, info map[types.JID]types.UserInfo, userErr error) businessResult {
+// verifiedName is the business name already read from the contact store, or
+// empty when that query failed.
+func (c *businessCache) lookupFromUser(ctx context.Context, client businessClient, jid types.JID, userErr error, verifiedName string) businessResult {
 	if result, ok := c.fresh(client, jid); ok {
 		return result
 	}
-	return c.storeLookup(ctx, client, jid, info, userErr)
+	if userErr != nil {
+		verifiedName = ""
+	}
+	return c.storeLookup(ctx, client, jid, userErr, verifiedName)
 }
 
 func (c *businessCache) fresh(client businessClient, jid types.JID) (businessResult, bool) {
@@ -84,7 +97,7 @@ func (c *businessCache) fresh(client businessClient, jid types.JID) (businessRes
 	return businessResult{}, false
 }
 
-func (c *businessCache) storeLookup(ctx context.Context, client businessClient, jid types.JID, info map[types.JID]types.UserInfo, userErr error) businessResult {
+func (c *businessCache) storeLookup(ctx context.Context, client businessClient, jid types.JID, userErr error, verifiedName string) businessResult {
 	result := businessResult{Success: true, JID: jid.String(), Categories: []string{}}
 	if userErr != nil {
 		result.VerifiedNameError = "verified name lookup failed"
@@ -93,12 +106,10 @@ func (c *businessCache) storeLookup(ctx context.Context, client businessClient, 
 			result.RateLimited = true
 			result.VerifiedNameError = "verified name lookup rate limited (429)"
 		}
-	} else if user, exists := info[jid]; exists {
-		if user.VerifiedName != nil {
-			business := true
-			result.IsBusiness = &business
-			result.VerifiedName = user.VerifiedName.Details.GetVerifiedName()
-		}
+	} else if name := strings.TrimSpace(verifiedName); name != "" {
+		business := true
+		result.IsBusiness = &business
+		result.VerifiedName = name
 	}
 	// This independent query still runs after usync refuses the verified name.
 	profile, err := client.GetBusinessProfile(ctx, jid)
@@ -154,7 +165,7 @@ func (c *businessCache) storeLookup(ctx context.Context, client businessClient, 
 	return result
 }
 
-func handleCheckBusiness(client businessClient, cache *businessCache, policy chatPolicyResolver, connected func() bool) http.HandlerFunc {
+func handleCheckBusiness(client businessClient, cache *businessCache, policy chatPolicyResolver, connected func() bool, nameOf func(context.Context, types.JID) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		jid, ok := authorizeChat(w, policy.effective(r.Context()), r.URL.Query().Get("jid"), false)
 		if !ok {
@@ -170,6 +181,6 @@ func handleCheckBusiness(client businessClient, cache *businessCache, policy cha
 		}
 		ctx, cancel := requestContext(r, actionDeadline)
 		defer cancel()
-		writeJSON(w, 200, cache.lookup(ctx, client, jid))
+		writeJSON(w, 200, cache.lookup(ctx, client, jid, nameOf))
 	}
 }

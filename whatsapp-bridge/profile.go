@@ -213,7 +213,9 @@ type profileDeps struct {
 
 func handleGetProfile(deps profileDeps) http.HandlerFunc {
 	if deps.download == nil {
-		deps.download = downloadProfilePicture
+		deps.download = func(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
+			return downloadProfilePicture(ctx, rawURL, limit, nil)
+		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw, err := normalizePhoneRecipient(strings.TrimSpace(r.URL.Query().Get("jid")))
@@ -265,6 +267,7 @@ func handleGetProfile(deps profileDeps) http.HandlerFunc {
 		}
 		resolved := jid
 		on := true
+		registeredName := ""
 		if jid.Server == types.DefaultUserServer {
 			answer, asked, askErr := askOnWhatsApp(ctx, deps.onWhatsApp, jid.User)
 			if !asked {
@@ -297,6 +300,7 @@ func handleGetProfile(deps profileDeps) http.HandlerFunc {
 				writeJSON(w, http.StatusOK, result)
 				return
 			}
+			registeredName = verifiedNameText(answer.VerifiedName)
 			if phone := registeredPhoneJID(answer); !phone.IsEmpty() {
 				resolved = phone
 			} else if answer.JID.Server == types.HiddenUserServer && answer.JID.User != "" {
@@ -317,7 +321,7 @@ func handleGetProfile(deps profileDeps) http.HandlerFunc {
 			result.PictureStatus = profileStatusError
 			result.RateLimited = true
 			result.Message = profileRateMessage
-			finishProfile(w, ctx, deps, jid, resolved, account, &result, info, userErr, true)
+			finishProfile(w, ctx, deps, jid, resolved, account, &result, userErr, true, registeredName)
 			return
 		}
 		applyUserInfo(&result, resolved, info, userErr)
@@ -326,6 +330,12 @@ func handleGetProfile(deps profileDeps) http.HandlerFunc {
 		if limited {
 			result.RateLimited = true
 			result.Message = profileRateMessage
+		}
+		if status == profileStatusHidden || status == profileStatusNone {
+			if err := removeCachedProfilePictures(deps.root, resolved, jid); err != nil {
+				bridgeLog.Warnf("profile picture cache could not be cleared")
+				result.PictureStatus = profileStatusError
+			}
 		}
 		if picture != nil {
 			if picture.ID != "" {
@@ -338,13 +348,17 @@ func handleGetProfile(deps profileDeps) http.HandlerFunc {
 			}
 		}
 		stopBusiness := result.RateLimited
-		finishProfile(w, ctx, deps, jid, resolved, account, &result, info, userErr, stopBusiness)
+		finishProfile(w, ctx, deps, jid, resolved, account, &result, userErr, stopBusiness, registeredName)
 	}
 }
 
-func finishProfile(w http.ResponseWriter, ctx context.Context, deps profileDeps, query, resolved types.JID, account *types.JID, result *profileResult, info map[types.JID]types.UserInfo, userErr error, stopBusiness bool) {
+func finishProfile(w http.ResponseWriter, ctx context.Context, deps profileDeps, query, resolved types.JID, account *types.JID, result *profileResult, userErr error, stopBusiness bool, registeredName string) {
 	if result.RateLimited && result.Message == "" {
 		result.Message = profileRateMessage
+	}
+	candidates := profileCandidates(ctx, deps.store, resolved)
+	if query.String() != resolved.String() {
+		candidates = append(profileCandidates(ctx, deps.store, query), candidates...)
 	}
 	if stopBusiness {
 		if deps.business != nil {
@@ -353,14 +367,24 @@ func finishProfile(w http.ResponseWriter, ctx context.Context, deps profileDeps,
 			}
 		}
 	} else if deps.business != nil {
-		applyBusiness(result, deps.business.lookupFromUser(ctx, deps.client, resolved, info, userErr))
+		storedName := ""
+		if userErr == nil {
+			storedName = localBusinessName(ctx, deps.store, account, candidates)
+		}
+		applyBusiness(result, deps.business.lookupFromUser(ctx, deps.client, resolved, userErr, storedName))
 		if result.RateLimited && result.Message == "" {
 			result.Message = profileRateMessage
 		}
 	}
-	candidates := profileCandidates(ctx, deps.store, resolved)
-	if query.String() != resolved.String() {
-		candidates = append(profileCandidates(ctx, deps.store, query), candidates...)
+	// A phone registration answer carries the verified name. GetUserInfo does
+	// not. A LID has no registration answer, so the contact-store business
+	// name above is the one the user query just recorded.
+	if name := strings.TrimSpace(registeredName); name != "" {
+		result.VerifiedName = name
+		if result.IsBusiness == nil {
+			business := true
+			result.IsBusiness = &business
+		}
 	}
 	result.PushName = localPushName(ctx, deps.store, account, candidates)
 	if ctx.Err() == nil {
@@ -422,6 +446,13 @@ func applyBusiness(result *profileResult, business businessResult) {
 	if business.RateLimited {
 		result.RateLimited = true
 	}
+}
+
+func verifiedNameText(name *types.VerifiedName) string {
+	if name == nil || name.Details == nil {
+		return ""
+	}
+	return strings.TrimSpace(name.Details.GetVerifiedName())
 }
 
 func askOnWhatsApp(ctx context.Context, ask isOnWhatsAppFunc, user string) (types.IsOnWhatsAppResponse, bool, error) {
@@ -546,6 +577,43 @@ func storeProfilePicture(root *os.Root, chat types.JID, now time.Time, data []by
 	return name, nil
 }
 
+func removeCachedProfilePictures(root *os.Root, chats ...types.JID) error {
+	if root == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var first error
+	for _, chat := range chats {
+		if chat.User == "" || chat.Server == "" {
+			continue
+		}
+		dir := chatMediaRel(chat.String())
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		entries, err := fs.ReadDir(root.FS(), dir)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if first == nil {
+				first = err
+			}
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || cachedProfileID(entry.Name()) != profilePictureID {
+				continue
+			}
+			if err := root.Remove(path.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
+				first = err
+			}
+		}
+	}
+	return first
+}
+
 func cachedProfileID(name string) string {
 	base := path.Base(name)
 	stem := strings.TrimSuffix(base, path.Ext(base))
@@ -658,7 +726,34 @@ func contactPushName(ctx context.Context, db *sql.DB, account *types.JID, id typ
 	return strings.TrimSpace(push.String), true
 }
 
-func downloadProfilePicture(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
+func localBusinessName(ctx context.Context, store *MessageStore, account *types.JID, candidates []types.JID) string {
+	if store == nil || store.waDB == nil {
+		return ""
+	}
+	for _, id := range candidates {
+		name, ok := contactBusinessName(ctx, store.waDB, account, id)
+		if ok && name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func contactBusinessName(ctx context.Context, db *sql.DB, account *types.JID, id types.JID) (string, bool) {
+	var name sql.NullString
+	var err error
+	if account != nil && account.String() != "" {
+		err = db.QueryRowContext(ctx, `SELECT business_name FROM whatsmeow_contacts WHERE their_jid=? AND our_jid=? LIMIT 1`, id.String(), account.String()).Scan(&name)
+	} else {
+		err = db.QueryRowContext(ctx, `SELECT business_name FROM whatsmeow_contacts WHERE their_jid=? LIMIT 1`, id.String()).Scan(&name)
+	}
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(name.String), true
+}
+
+func downloadProfilePicture(ctx context.Context, rawURL string, limit int64, media *http.Client) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, errors.New("profile picture url refused")
@@ -669,25 +764,14 @@ func downloadProfilePicture(ctx context.Context, rawURL string, limit int64) ([]
 	if limit <= 0 {
 		return nil, errors.New("profile picture size limit refused")
 	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && !profilePictureIPAllowed(ip) {
+		return nil, errors.New("profile picture url refused")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, errors.New("profile picture download failed")
 	}
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:                 nil,
-			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, Control: refusePrivateProfileDial}).DialContext,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 15 * time.Second,
-			DisableKeepAlives:     true,
-		},
-		CheckRedirect: func(redirect *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return errors.New("profile picture redirect limit")
-			}
-			return validateProfilePictureURL(redirect.URL)
-		},
-	}
+	client := profilePictureClient(media)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("profile picture download failed")
@@ -704,6 +788,39 @@ func downloadProfilePicture(ctx context.Context, rawURL string, limit int64) ([]
 		return nil, errors.New("profile picture exceeds the size limit")
 	}
 	return body, nil
+}
+
+// profilePictureClient uses the WhatsApp media client when one is configured,
+// so a proxy set for media downloads also carries the profile photo. The copy
+// shares that transport and adds redirect checks without changing the client
+// media uploads and downloads already use. With no media client, the photo is
+// dialed directly and a private address is refused.
+func profilePictureClient(media *http.Client) *http.Client {
+	redirect := func(redirect *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return errors.New("profile picture redirect limit")
+		}
+		if err := validateProfilePictureURL(redirect.URL); err != nil {
+			return err
+		}
+		if ip := net.ParseIP(redirect.URL.Hostname()); ip != nil && !profilePictureIPAllowed(ip) {
+			return errors.New("profile picture url refused")
+		}
+		return nil
+	}
+	if media != nil {
+		return &http.Client{Transport: media.Transport, Timeout: media.Timeout, CheckRedirect: redirect}
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 nil,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, Control: refusePrivateProfileDial}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 15 * time.Second,
+			DisableKeepAlives:     true,
+		},
+		CheckRedirect: redirect,
+	}
 }
 
 func validateProfilePictureURL(target *url.URL) error {

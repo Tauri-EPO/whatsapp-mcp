@@ -391,7 +391,7 @@ Local Bandit commands from the repository root (install with `python -m pip inst
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `WHATSAPP_PROXY_URL` | empty (SDK defaults) | Explicit socks5:// (port required), http:// or https:// egress proxy for WhatsApp pre/post-login websocket and media upload/download only. Never REST/operator/admin, webhook, S3 or transcription clients. Health reports only proxy_enabled. |
+| `WHATSAPP_PROXY_URL` | empty (SDK defaults) | Explicit socks5:// (port required), http:// or https:// egress proxy for WhatsApp pre/post-login websocket and media upload/download only, including profile photos. Never REST/operator/admin, webhook, S3 or transcription clients. Health reports only proxy_enabled. |
 | `WHATSAPP_PROXY_URL_FILE` | empty | Alternative owner-only regular proxy URL file, at most 4096 bytes; symlinks refused. Set URL or file, never both. Credentials are never logged. Mount separately into the bridge. |
 | `WHATSAPP_MCP_SOCKET` | empty (off) | Additional HTTP/SSE Unix listener; TCP stays. Absolute path outside store/outbox/media roots; existing parent, no symlinks, mode 0660, process uid (1000 in images). Remove only our stale socket; live sockets and other files refused. Same Host policy; bearer/OAuth required even with loopback TCP, bridge-token fallback and default rate limit enabled. Only ASCII whitespace is trimmed; Unicode filename characters are preserved. |
 | `WHATSAPP_OPERATOR_SOCKET` | empty (off) | Additional private operator Unix listener with the same filesystem rules and streaming export. Enables loopback TCP operator when BIND is unset; operator bearer remains required. |

@@ -1911,14 +1911,17 @@ def get_profile(jid: str) -> dict[str, Any]:
     Returns on_whatsapp and the resolved jid. about and about_status describe
     the status text (ok, none or error). A hidden status text is not an error:
     the connected client does not report a privacy code for it, so a hidden
-    about arrives empty and about_status is none. verified_name, categories,
-    email, address and website come from the same cache as check_business.
-    picture_id and picture_status (ok, none, hidden_by_privacy or error)
-    describe the photo. When picture_status is ok, picture_chat_jid and
-    picture_message_id name the cached file; open it with read_media. The
-    photo stays in the existing media store and follows its retention.
+    about arrives empty and about_status is none. verified_name for a phone
+    comes from the registration check; for a LID it is the business name in
+    the local contact store. categories, email, address and website come from
+    the same cache as check_business. picture_id and picture_status (ok, none,
+    hidden_by_privacy or error) describe the photo. When picture_status is ok,
+    picture_chat_jid and picture_message_id name the cached file; open it with
+    read_media. The photo stays in the existing media store and follows its
+    retention. A later hidden or missing photo deletes that file. With a
+    WhatsApp proxy configured, the download uses the media client.
     push_name is copied from the local contact store only and is never queried;
-    it is null when that store has no push name, and push_name_source is
+    it is omitted when that store has no push name, and push_name_source is
     local_store. Complete answers are cached for about an hour and partial
     ones for about a minute. A WhatsApp 429 sets rate_limited and must not be
     retried. Lookups of numbers this account has not seen are limited per hour
@@ -1935,7 +1938,8 @@ def get_profile(jid: str) -> dict[str, Any]:
 def check_business(jid: str) -> dict[str, Any]:
     """Check whether a phone/LID user is a WhatsApp Business account.
 
-    Returns is_business (null if unknown), verified_name, categories, email,
+    Returns is_business (null if unknown), verified_name (the business name
+    recorded in the contact store after the user query), categories, email,
     address and website when available. Complete answers are cached for one
     hour, up to 256 users; partial/rate-limited answers expire within one minute
     and unknown outages are not cached. A verified-name 429 sets rate_limited and verified_name_error;

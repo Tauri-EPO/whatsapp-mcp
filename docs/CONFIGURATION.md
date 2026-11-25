@@ -6,7 +6,7 @@ Every environment variable and CLI flag, plus the transport, authentication and 
 
 | Variable | Default | Behavior |
 |---|---|---|
-| `WHATSAPP_PROXY_URL` | empty | Explicit `socks5://host:port`, `http://host[:port]` or `https://host[:port]`, optionally with percent-encoded credentials. WhatsApp pre/post-login websocket and media download/upload only. |
+| `WHATSAPP_PROXY_URL` | empty | Explicit `socks5://host:port`, `http://host[:port]` or `https://host[:port]`, optionally with percent-encoded credentials. WhatsApp pre/post-login websocket and media download/upload only, including profile photos. |
 | `WHATSAPP_PROXY_URL_FILE` | empty | Private owner-only regular file, at most 4096 bytes; no symlink. Set URL or file, never both. Mount into bridge separately. |
 | `WHATSAPP_MCP_SOCKET` | empty | Add a Unix HTTP/SSE listener to the MCP TCP listener. Same Host policy, bearer/OAuth and shared app/session manager. Only ASCII whitespace is trimmed; Unicode filename characters are preserved. |
 | `WHATSAPP_OPERATOR_SOCKET` | empty | Add a Unix operator listener, including streaming export, to operator TCP. If BIND is empty, TCP binds loopback. A distinct operator bearer is still required. |

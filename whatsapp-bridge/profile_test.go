@@ -10,15 +10,18 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waVnameCert"
 	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -150,7 +153,11 @@ func TestProfilePictureStatuses(t *testing.T) {
 		{
 			name: "ok", status: profileStatusOK, about: "hello", network: true,
 			client: fakeProfileClient{
-				fakeBusinessClient: fakeBusinessClient{user: types.UserInfo{Status: "hello", PictureID: "pic-1", VerifiedName: alice}, profile: &types.BusinessProfile{Email: "alice@example.test"}},
+				// GetUserInfo leaves VerifiedName empty. IsOnWhatsApp fills it.
+				fakeBusinessClient: fakeBusinessClient{user: types.UserInfo{Status: "hello", PictureID: "pic-1"}, profile: &types.BusinessProfile{Email: "alice@example.test"}},
+				answers: []types.IsOnWhatsAppResponse{{
+					Query: "+" + phone, IsIn: true, JID: types.NewJID(phone, types.DefaultUserServer), VerifiedName: alice,
+				}},
 			},
 		},
 		{
@@ -186,7 +193,7 @@ func TestProfilePictureStatuses(t *testing.T) {
 				t.Fatalf("code=%d body=%+v", code, got)
 			}
 			if tc.name == "ok" {
-				if got.VerifiedName != "Alice" || got.PictureMessageID != profilePictureID || got.PictureChatJID != phone+"@s.whatsapp.net" || got.PushNameSource != profilePushNameSource || got.OnWhatsApp == nil || !*got.OnWhatsApp {
+				if client.user.VerifiedName != nil || got.VerifiedName != "Alice" || got.PictureMessageID != profilePictureID || got.PictureChatJID != phone+"@s.whatsapp.net" || got.PushNameSource != profilePushNameSource || got.OnWhatsApp == nil || !*got.OnWhatsApp {
 					t.Fatalf("%+v", got)
 				}
 				entries, err := fs.ReadDir(f.root.FS(), phone+"@s.whatsapp.net")
@@ -369,15 +376,135 @@ func TestProfileRefusesPrivatePictureURLs(t *testing.T) {
 		_, _ = w.Write([]byte("secret"))
 	}))
 	defer server.Close()
-	if _, err := downloadProfilePicture(context.Background(), server.URL, 1024); err == nil {
+	if _, err := downloadProfilePicture(context.Background(), server.URL, 1024, nil); err == nil {
 		t.Fatal("loopback picture download was accepted")
 	}
 	for _, raw := range []string{"http://cdn.example.test/photo", "https://user:pass@cdn.example.test/photo", "https:///photo"} {
-		if _, err := downloadProfilePicture(context.Background(), raw, 1024); err == nil {
+		if _, err := downloadProfilePicture(context.Background(), raw, 1024, nil); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}
 	}
 	if !profilePictureIPAllowed(net.ParseIP("8.8.8.8")) || profilePictureIPAllowed(net.ParseIP("10.1.2.3")) || profilePictureIPAllowed(net.ParseIP("127.0.0.1")) || profilePictureIPAllowed(net.ParseIP("169.254.1.1")) {
 		t.Fatal("address classification changed")
+	}
+}
+
+func TestProfileVerifiedNameUsesTheContactStoreForALID(t *testing.T) {
+	client := &fakeProfileClient{fakeBusinessClient: fakeBusinessClient{user: types.UserInfo{Status: "hello"}}}
+	if client.user.VerifiedName != nil {
+		t.Fatal("fake filled VerifiedName, which GetUserInfo does not")
+	}
+	f := newProfileFixture(t, client)
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "contacts.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE whatsmeow_contacts(our_jid TEXT, their_jid TEXT, push_name TEXT, business_name TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	lid := types.NewJID("100000000000001", types.HiddenUserServer)
+	if _, err := db.Exec(`INSERT INTO whatsmeow_contacts VALUES('self', ?, 'Bob', 'Bob')`, lid.String()); err != nil {
+		t.Fatal(err)
+	}
+	f.store = newTestMessageStore(t)
+	f.store.waDB = db
+	f.rebuild(t)
+	code, got := f.get(lid.String())
+	if code != 200 || got.VerifiedName != "Bob" || client.onCalls != 0 || client.user.VerifiedName != nil {
+		t.Fatalf("%d %+v calls=%d", code, got, client.onCalls)
+	}
+}
+
+func TestProfileHiddenOrMissingPictureRemovesTheCachedFile(t *testing.T) {
+	phone := "5511999999999"
+	registered := "5511888888888"
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status string
+	}{
+		{"hidden", whatsmeow.ErrProfilePictureUnauthorized, profileStatusHidden},
+		{"none", whatsmeow.ErrProfilePictureNotSet, profileStatusNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeProfileClient{answers: []types.IsOnWhatsAppResponse{{
+				Query: "+" + phone, IsIn: true,
+				JID: types.NewJID(registered, types.DefaultUserServer), PhoneNumber: types.NewJID(registered, types.DefaultUserServer),
+			}}}
+			f := newProfileFixture(t, client)
+			code, got := f.get(phone)
+			if code != 200 || got.PictureStatus != profileStatusOK || got.PictureMessageID != profilePictureID {
+				t.Fatalf("first: %d %+v", code, got)
+			}
+			if !profilePictureCached(t, f.root, registered+"@s.whatsapp.net") {
+				t.Fatal("photo was not stored")
+			}
+			f.now = f.now.Add(time.Hour + time.Second)
+			client.picture = nil
+			client.pictureErr = tc.err
+			code, got = f.get(phone)
+			if code != 200 || got.PictureStatus != tc.status || got.PictureMessageID != "" || client.downloads != 1 {
+				t.Fatalf("second: %d %+v downloads=%d", code, got, client.downloads)
+			}
+			if profilePictureCached(t, f.root, registered+"@s.whatsapp.net") || profilePictureCached(t, f.root, phone+"@s.whatsapp.net") {
+				t.Fatal("previous photo stayed readable")
+			}
+		})
+	}
+}
+
+func profilePictureCached(t *testing.T, root *os.Root, chat string) bool {
+	t.Helper()
+	entries, err := fs.ReadDir(root.FS(), chat)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if cachedProfileID(entry.Name()) == profilePictureID {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProfilePictureDownloadUsesTheProxyMediaClient(t *testing.T) {
+	var hits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Method != http.MethodConnect {
+			t.Errorf("method %s host %s", r.Method, r.Host)
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer proxy.Close()
+	u, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != u.Host {
+			t.Errorf("profile picture dialed %s instead of the media proxy", address)
+			return nil, errors.New("direct dial")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	var media atomic.Pointer[http.Client]
+	factory := proxyClientFactoryTransport(nil, u, transport, &media)
+	if factory(newTestClient(&mockLIDStore{}).Store, waLog.Noop) == nil || media.Load() == nil {
+		t.Fatal("proxy did not install the media client")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := downloadProfilePicture(ctx, "http://cdn.example.test/photo.jpg", 1024, media.Load()); err == nil {
+		t.Fatal("plain http photo was accepted")
+	}
+	if hits.Load() != 0 {
+		t.Fatal("refused url still reached the proxy")
+	}
+	_, err = downloadProfilePicture(ctx, "https://cdn.example.test/photo.jpg", 1024, media.Load())
+	if err == nil || hits.Load() == 0 {
+		t.Fatalf("proxy hits=%d err=%v", hits.Load(), err)
 	}
 }
