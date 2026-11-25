@@ -105,6 +105,10 @@ var readOnlyMutatingEndpoints = []struct {
 	{"/api/media/purge", `{"chat_jid":"5511999999999@s.whatsapp.net","dry_run":false}`},
 	{"/api/history", `{"chat_jid":"5511999999999@s.whatsapp.net","count":50}`},
 	{"/api/webhook/test", `{}`},
+	{"/api/profile/photo", `{"path":"/tmp/photo.jpg"}`},
+	{"/api/profile/photo/remove", `{}`},
+	{"/api/profile/about", `{"text":"hello"}`},
+	{"/api/profile/name", `{"name":"Alice"}`},
 }
 
 func TestReadOnlyRefusesMutatingEndpoints(t *testing.T) {

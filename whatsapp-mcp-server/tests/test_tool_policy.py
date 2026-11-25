@@ -50,6 +50,10 @@ EXPECTED_MUTATING = {
     "leave_group",
     "purge_media",
     "request_history",
+    "set_profile_photo",
+    "remove_profile_photo",
+    "set_about",
+    "set_display_name",
 }
 
 # Reads (and local-only writes) that must survive read-only mode.
@@ -302,6 +306,10 @@ class TestCallTimeDenial:
             lambda: main.reset_group_invite_link("120363@g.us"),
             lambda: main.leave_group("120363@g.us"),
             lambda: main.purge_media(chat_jid="5511999999999@s.whatsapp.net", dry_run=False),
+            lambda: main.set_profile_photo("/tmp/photo.jpg"),
+            lambda: main.remove_profile_photo(),
+            lambda: main.set_about("hello"),
+            lambda: main.set_display_name("Alice"),
         ],
     )
     def test_mutating_tools_return_the_denied_envelope(self, call):

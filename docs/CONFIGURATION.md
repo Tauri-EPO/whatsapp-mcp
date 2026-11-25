@@ -679,14 +679,16 @@ Why this matters: an agent that reads any group or forwarded message is reading
 attacker-controlled text. Told "never send without approval", it is one prompt
 injection away from sending. With read-only on there is no send tool to call.
 
-**Blocked** (23 tools / 20 endpoints): `send_message`, `send_file`,
+**Blocked** (27 tools / 24 endpoints): `send_message`, `send_file`,
 `send_audio_message`, `send_reaction`, `send_typing`, `archive_chat`, `delete_chat`, `block_contact`, `label_chat`, `mark_messages_read`,
 `delete_message`, `delete_messages_for_me`, `edit_message`, `forward_message`,
 `manage_group_participants`, `update_group`, `get_group_invite_link`,
-`reset_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `create_group`, `test_webhook`; on the bridge `/api/send`, `/api/react`,
+`reset_group_invite_link`, `leave_group`, `purge_media`, `request_history`, `create_group`, `test_webhook`,
+`set_profile_photo`, `remove_profile_photo`, `set_about`, `set_display_name`; on the bridge `/api/send`, `/api/react`,
 `/api/typing`, `/api/chat/archive`, `/api/chat/delete`, `/api/block`, `/api/chat/label`, `/api/mark-read`, `/api/delete`, `/api/delete-for-me`, `/api/edit`, `/api/forward`,
 `/api/group/participants`, `/api/group/subject`, `/api/group/invite`,
-`/api/group/leave`, `/api/media/purge`, `/api/history`, `/api/group/create`, `/api/webhook/test`.
+`/api/group/leave`, `/api/media/purge`, `/api/history`, `/api/group/create`, `/api/webhook/test`,
+`/api/profile/photo`, `/api/profile/photo/remove`, `/api/profile/about`, `/api/profile/name`.
 
 **Still available:** every read tool, plus
 

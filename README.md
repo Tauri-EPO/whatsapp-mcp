@@ -40,6 +40,7 @@ If that sounds like you, the [60-second start](#60-second-start) below gets you 
 | **Business labels** | `list_labels` reads the cached catalog and `label_chat` applies or removes an existing label on a conversation |
 | **File chats** | `archive_chat` archives or unarchives a conversation on the phone while keeping its local history; `delete_chat` deletes it on the phone (irreversible, `confirm=true`) and drops the same range locally |
 | **Block** | `block_contact` blocks or unblocks a contact, `get_blocklist` lists who is blocked |
+| **Own profile** | `set_profile_photo` and `remove_profile_photo` change this account's profile photo, `set_about` the about text and `set_display_name` the push name (2.15.0). A WhatsApp 429 is `rate_limited`: report it and do not retry |
 | **Self-check** | `bridge_status` tells the agent whether the bridge is paired and connected before it blames an empty result; `get_webhook` inspects the runtime receiver and `test_webhook` sends a synthetic event to its existing destination; `coverage` shows what the archive really holds and which periods are missing; `request_history` asks the phone to backfill a chat whose archive starts too late |
 
 The full list with parameters is in [docs/TOOLS.md](docs/TOOLS.md).
