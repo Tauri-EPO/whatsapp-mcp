@@ -47,13 +47,13 @@ def test_profile_tools_declare_their_arguments_and_are_writes():
     assert set(photo.parameters["properties"]) == {"path"}
     assert photo.parameters["required"] == ["path"]
     assert photo.annotations.read_only_hint is False
-    assert photo.annotations.destructive_hint is False
+    assert photo.annotations.destructive_hint is True
     assert photo.annotations.idempotent_hint is False
     assert photo.annotations.open_world_hint is True
 
     remove = _tool("remove_profile_photo")
     assert remove.parameters["properties"] == {}
-    assert remove.annotations.destructive_hint is False
+    assert remove.annotations.destructive_hint is True
     assert remove.annotations.idempotent_hint is True
     assert remove.annotations.open_world_hint is True
 
@@ -61,14 +61,14 @@ def test_profile_tools_declare_their_arguments_and_are_writes():
     assert set(about.parameters["properties"]) == {"text"}
     assert about.parameters["required"] == ["text"]
     assert about.annotations.idempotent_hint is True
-    assert about.annotations.destructive_hint is False
+    assert about.annotations.destructive_hint is True
     assert about.annotations.open_world_hint is True
 
     name = _tool("set_display_name")
     assert set(name.parameters["properties"]) == {"name"}
     assert name.parameters["required"] == ["name"]
     assert name.annotations.idempotent_hint is True
-    assert name.annotations.destructive_hint is False
+    assert name.annotations.destructive_hint is True
     assert name.annotations.open_world_hint is True
 
 

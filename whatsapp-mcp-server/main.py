@@ -2017,7 +2017,7 @@ def update_group(chat_jid: str, name: str | None = None, description: str | None
     return whatsapp_update_group(chat_jid, name=name, description=description)
 
 
-@mcp.tool(annotations=_writes("Set profile photo", destructive=False, idempotent=False, open_world=True))
+@mcp.tool(annotations=_writes("Set profile photo", destructive=True, idempotent=False, open_world=True))
 @tool_errors
 @mutating_tool
 def set_profile_photo(path: str) -> dict[str, Any]:
@@ -2025,9 +2025,10 @@ def set_profile_photo(path: str) -> dict[str, Any]:
 
     ``path`` is an absolute path to a JPEG or PNG inside the same directories
     ``send_file`` uses (``WHATSAPP_MEDIA_ROOTS``). The bridge center-crops it
-    to a square and uploads a 640x640 JPEG. The result is ``picture_id``, the
-    new picture id. A ``rate_limited`` error means WhatsApp refused the change
-    for now: report it and do not retry. Ships in 2.15.0.
+    to a square and uploads a 640x640 JPEG. An EXIF orientation tag is left
+    unused, so a sideways camera JPEG stays sideways. The result is
+    ``picture_id``, the new picture id. A ``rate_limited`` error means
+    WhatsApp refused the change for now: report it and do not retry.
 
     Args:
         path: Absolute path of the JPEG or PNG to upload.
@@ -2035,25 +2036,25 @@ def set_profile_photo(path: str) -> dict[str, Any]:
     return whatsapp_set_profile_photo(path)
 
 
-@mcp.tool(annotations=_writes("Remove profile photo", destructive=False, idempotent=True, open_world=True))
+@mcp.tool(annotations=_writes("Remove profile photo", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def remove_profile_photo() -> dict[str, Any]:
     """Remove this account's profile photo.
 
-    A ``rate_limited`` error means report it and do not retry. Ships in 2.15.0.
+    A ``rate_limited`` error means report it and do not retry.
     """
     return whatsapp_remove_profile_photo()
 
 
-@mcp.tool(annotations=_writes("Set about text", destructive=False, idempotent=True, open_world=True))
+@mcp.tool(annotations=_writes("Set about text", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def set_about(text: str) -> dict[str, Any]:
     """Set this account's About text (the profile status, not a status post).
 
     At most 139 characters. An empty string clears it. A ``rate_limited``
-    error means report it and do not retry. Ships in 2.15.0.
+    error means report it and do not retry.
 
     Args:
         text: The new About text, or "" to clear it.
@@ -2061,7 +2062,7 @@ def set_about(text: str) -> dict[str, Any]:
     return whatsapp_set_about(text)
 
 
-@mcp.tool(annotations=_writes("Set push name", destructive=False, idempotent=True, open_world=True))
+@mcp.tool(annotations=_writes("Set push name", destructive=True, idempotent=True, open_world=True))
 @tool_errors
 @mutating_tool
 def set_display_name(name: str) -> dict[str, Any]:
@@ -2071,7 +2072,6 @@ def set_display_name(name: str) -> dict[str, Any]:
     contacts and not a business verified name. It needs app-state keys the
     phone has already synced, and the phone can overwrite it later. 1 to 25
     characters. A ``rate_limited`` error means report it and do not retry.
-    Ships in 2.15.0.
 
     Args:
         name: The new push name.

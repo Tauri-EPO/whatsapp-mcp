@@ -1254,11 +1254,11 @@ Leave a group. Irreversible without a new invite; the local archive keeps the hi
 
 ### Own profile
 
-These four tools change the paired account itself. They ship in 2.15.0. Each is a write (`openWorldHint` true, not destructive), so `WHATSAPP_READ_ONLY` and `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` can turn them off one by one. A WhatsApp `429` comes back as `rate_limited`: report it and do not retry. There is no retry loop.
+These four tools change the paired account itself. They ship in 2.15.0. Each is a destructive write (`openWorldHint` true): contacts see the new photo, About text or push name, and removing the photo drops it. `WHATSAPP_READ_ONLY` and `WHATSAPP_ALLOW_TOOLS` / `WHATSAPP_DENY_TOOLS` still turn them off one by one. A WhatsApp `429` comes back as `rate_limited`: report it and do not retry. There is no retry loop.
 
 ### `set_profile_photo`
 
-Replace this account's profile photo. **Parameters:** `path`, an absolute path to a JPEG or PNG in the same directories `send_file` uses (`WHATSAPP_MEDIA_ROOTS`). The bridge center-crops the image to a square and uploads a 640×640 JPEG, at most 512 KiB. Files larger than 8 MiB, or with an edge longer than 4096 pixels, are refused before anything is sent. Returns `picture_id`.
+Replace this account's profile photo. **Parameters:** `path`, an absolute path to a JPEG or PNG in the same directories `send_file` uses (`WHATSAPP_MEDIA_ROOTS`). The bridge center-crops the image to a square and uploads a 640×640 JPEG, at most 512 KiB. An EXIF orientation tag is left unused, so a sideways camera JPEG stays sideways. Files larger than 8 MiB, or with an edge longer than 4096 pixels, are refused before anything is sent. Returns `picture_id`.
 
 ### `remove_profile_photo`
 

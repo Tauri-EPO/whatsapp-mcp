@@ -123,6 +123,7 @@ OTHER_DESTRUCTIVE_TOOLS = {
     "clear_media_refusal",
     "manage_group_participants",
     "purge_media",
+    "remove_profile_photo",
     "reset_group_invite_link",
 }
 
