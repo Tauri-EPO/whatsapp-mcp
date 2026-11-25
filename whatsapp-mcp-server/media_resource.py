@@ -138,7 +138,7 @@ def read_media_resource(chat_jid: str, message_id: str) -> ReadResourceContents:
         with media_read.media_remote.local_file(
             found.path, found.size, found.sha256, cache_only=not media_read.offers_download()
         ) as local:
-            if media_read.media_remote.enabled():
+            if media_read.media_remote.enabled() and message_id != media_read.PROFILE_PICTURE_ID:
                 mime = media_read.spooled_mime(media_read._media_row(chat_jid, message_id)[0], found.filename, local)
                 found = found._replace(mime=mime, size=os.path.getsize(local))
                 media_read.check_size(found.size, media_read.hard_limit(mime), mime, "resources/read")

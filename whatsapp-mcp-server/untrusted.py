@@ -130,7 +130,7 @@ ELLIPSIS = "…"
 # They are cleaned like a name and, unlike a name, delimited when the envelope
 # is on: they appear once per result, not once per row, so the delimiters cost
 # nothing an agent will miss.
-PROSE_KEYS = frozenset({"topic", "question"})
+PROSE_KEYS = frozenset({"topic", "question", "about"})
 
 # Line breaks and tabs stay in prose. A group description is genuinely written
 # in lines ("1. no links\n2. ..."), so stripping them would run its rules into

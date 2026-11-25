@@ -17,7 +17,7 @@ package main
 //
 // Reads stay open, including /api/download (it only fills the local media
 // cache), /api/blocklist, /api/group/members, /api/group/subgroups, /api/business,
-// /api/poll, /api/health, /api/ready.
+// /api/profile, /api/poll, /api/health, /api/ready.
 
 import (
 	"net/http"

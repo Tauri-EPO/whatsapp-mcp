@@ -95,7 +95,7 @@ func TestWhatsAppProxyWebsocketAndRealMediaDownload(t *testing.T) {
 		}
 		return (&net.Dialer{}).DialContext(ctx, network, address)
 	}
-	client := makeRuntimeClient(newTestClient(&mockLIDStore{}).Store, rec, proxyClientFactoryTransport(nil, u, transport))
+	client := makeRuntimeClient(newTestClient(&mockLIDStore{}).Store, rec, proxyClientFactoryTransport(nil, u, transport, nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := client.ConnectContext(ctx); err == nil {
