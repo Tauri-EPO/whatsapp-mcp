@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.15.0](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.14.2...v2.15.0) (2026-11-25)
+
+
+### Features
+
+* add get_profile for a live photo, about and verified name ([#869](https://github.com/Tauri-EPO/whatsapp-mcp/issues/869)) ([0fe7d46](https://github.com/Tauri-EPO/whatsapp-mcp/commit/0fe7d46d424a0e69baa186e9abe1c4de07a68238))
+* set the paired account's profile photo, about and push name ([#871](https://github.com/Tauri-EPO/whatsapp-mcp/issues/871)) ([5a621a5](https://github.com/Tauri-EPO/whatsapp-mcp/commit/5a621a5b1ad2b0e197bc74670e4b4040e86caf9b)), closes [#870](https://github.com/Tauri-EPO/whatsapp-mcp/issues/870)
+
 ## [2.14.2](https://github.com/Tauri-EPO/whatsapp-mcp/compare/v2.14.1...v2.14.2) (2026-11-23)
 
 
